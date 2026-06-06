@@ -21,22 +21,26 @@ jobs:
         run: |
           pip install "gradio_client" "requests[socks]" "pillow" "httpx[socks]" pysocks socksio
 
-      - name: Install and Start Tor
+      - name: Install and Start Cloudflare WARP
         run: |
+          # افزودن مخازن رسمی کلودفلر وارپ برای اوبونتو ۲۴.۰۴ (Noble)
+          curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/cloudflare-warp/ noble main" | sudo tee /etc/apt/sources.list.d/cloudflare-warp.list
           sudo apt-get update
-          sudo apt-get install -y tor
+          sudo apt-get install cloudflare-warp -y
           
-          # فیلتر کردن شدید کشورهای پرمصرف جهت هدایت تور به سمت کشورهای خلوت با سهمیه بکر
-          echo "ControlPort 9051" | sudo tee -a /etc/tor/torrc
-          echo "CookieAuthentication 0" | sudo tee -a /etc/tor/torrc
-          echo "ExcludeExitNodes {us},{de},{gb},{fr},{nl},{ru},{cn},{ca},{sg},{ua}" | sudo tee -a /etc/tor/torrc
-          echo "StrictNodes 1" | sudo tee -a /etc/tor/torrc
-          echo "MaxCircuitDirtiness 10" | sudo tee -a /etc/tor/torrc
-          echo "NewCircuitPeriod 10" | sudo tee -a /etc/tor/torrc
+          # اجرای دیمن سرویس وارپ
+          sudo systemctl start warp-svc || sudo /usr/bin/warp-svc &
+          sleep 4
           
-          sudo service tor restart
-          sleep 10
-          curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip || true
+          # ثبت‌نام کلاینت و تنظیم به عنوان پروکسی محلی روی پورت ۴۰۰۰
+          warp-cli --accept-tos registration new
+          warp-cli --accept-tos mode proxy
+          warp-cli --accept-tos connect
+          sleep 6
+          
+          # تست اتصال به پروکسی کلودفلر وارپ
+          curl --socks5-hostname 127.0.0.1:4000 https://ifconfig.me || true
 
       - name: Run Persistent Worker
         env:
@@ -62,33 +66,31 @@ jobs:
           start_time = time.time()
           max_run_duration = 5 * 60 * 60  # 5 hours
 
-          def renew_tor_ip():
-              """ارسال سیگنال به پورت کنترلی تور جهت تغییر هویت"""
+          def renew_warp_ip():
+              """حذف دیوایس فعلی و ثبت‌نام دیوایس جدید در کلودفلر برای تغییر فوری آی‌پی"""
               try:
-                  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                  s.settimeout(5)
-                  s.connect(('127.0.0.1', 9051))
-                  s.send(b'AUTHENTICATE ""\r\n')
-                  res = s.recv(1024)
-                  if b'250' in res:
-                      s.send(b'SIGNAL NEWNYM\r\n')
-                      res2 = s.recv(1024)
-                      if b'250' in res2:
-                          print("🔄 Tor IP successfully rotated/renewed.", flush=True)
-                          s.close()
-                          return True
-                  s.close()
-                  print(f"⚠️ Tor renewal failed. Auth response: {res}", flush=True)
+                  # قطع اتصال
+                  subprocess.run(["warp-cli", "--accept-tos", "disconnect"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  # حذف رجیستری برای ابطال آی‌پی قبلی
+                  subprocess.run(["warp-cli", "--accept-tos", "registration", "delete"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  time.sleep(1)
+                  # ثبت رجیستری جدید جهت دریافت آی‌پی کاملاً تازه از کلودفلر
+                  subprocess.run(["warp-cli", "--accept-tos", "registration", "new"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  # برقراری اتصال مجدد
+                  subprocess.run(["warp-cli", "--accept-tos", "connect"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  time.sleep(4)
+                  print("🔄 Cloudflare WARP IP rotated/renewed.", flush=True)
+                  return True
               except Exception as e:
-                  print(f"⚠️ Error renewing Tor IP: {e}", flush=True)
+                  print(f"⚠️ Error renewing WARP IP: {e}", flush=True)
               return False
 
           def get_current_ip():
-              """دریافت آی‌پی عمومی فعلی پروکسی تور"""
+              """دریافت آی‌پی عمومی فعلی پروکسی وارپ کلودفلر"""
               try:
                   proxies = {
-                      'http': 'socks5h://127.0.0.1:9050',
-                      'https': 'socks5h://127.0.0.1:9050'
+                      'http': 'socks5h://127.0.0.1:4000',
+                      'https': 'socks5h://127.0.0.1:4000'
                   }
                   r = requests.get("https://api.ipify.org", proxies=proxies, timeout=12)
                   return r.text.strip()
@@ -117,9 +119,9 @@ jobs:
                           # Prepare environment variables for the job script
                           job_env = os.environ.copy()
                           
-                          # Inject Tor proxy to bypass rate limits
-                          job_env["HTTP_PROXY"] = "socks5h://127.0.0.1:9050"
-                          job_env["HTTPS_PROXY"] = "socks5h://127.0.0.1:9050"
+                          # ارجاع ترافیک پایتون به سمت پروکسی محلی کلاینت وارپ کلودفلر
+                          job_env["HTTP_PROXY"] = "socks5h://127.0.0.1:4000"
+                          job_env["HTTPS_PROXY"] = "socks5h://127.0.0.1:4000"
                           
                           # Map client_payload to environment variables
                           for key, val in client_payload.items():
@@ -154,15 +156,14 @@ jobs:
                               ip_attempt += 1
                               current_ip = get_current_ip()
                               
-                              # تأیید فیزیکی تغییر آی‌پی و جلوگیری از هدر رفتن تلاش روی آی‌پی تکراری
+                              # تایید فیزیکی تغییر آی‌پی جهت هدر نرفتن تلاش
                               if last_ip and current_ip == last_ip and ip_attempt > 1:
-                                  print(f"[{run_id}] IP did not change ({current_ip}). Re-requesting Tor circuit...", flush=True)
-                                  renew_tor_ip()
-                                  time.sleep(12)
+                                  print(f"[{run_id}] IP did not change ({current_ip}). Re-requesting WARP registration...", flush=True)
+                                  renew_warp_ip()
                                   current_ip = get_current_ip()
                                   
                               last_ip = current_ip
-                              print(f"[{run_id}] Current Tor IP: {current_ip}", flush=True)
+                              print(f"[{run_id}] Current Cloudflare WARP IP: {current_ip}", flush=True)
                               print(f"Executing script for job {run_id} (IP Attempt {ip_attempt}/{max_ip_attempts})...", flush=True)
                               
                               process = subprocess.Popen(
@@ -185,12 +186,11 @@ jobs:
                                   job_success = True
                                   break
                               
-                              # هرگونه شکست در اجرای اسکریپت (کد خروجی غیر از صفر) به عنوان مشکل شبکه یا لیمیت آی‌پی تلقی می‌شود
+                              # بروز خطا در گام انتشار یا دریافت خروجی (خطای خروجی غیر از صفر)
                               print(f"[{run_id}] ⚠️ Job failed (Exit Code {process.returncode}). Assuming IP rate-limit/quota issue.", flush=True)
                               if ip_attempt < max_ip_attempts:
-                                  print(f"[{run_id}] Rotating Tor circuit and sleeping 12s before retrying...", flush=True)
-                                  renew_tor_ip()
-                                  time.sleep(12)
+                                  print(f"[{run_id}] Rotating Cloudflare WARP registration and retrying...", flush=True)
+                                  renew_warp_ip()
                                   continue
                               else:
                                   print(f"[{run_id}] Max IP rotation attempts reached for this job.", flush=True)
