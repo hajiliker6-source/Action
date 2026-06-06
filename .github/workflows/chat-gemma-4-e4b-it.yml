@@ -1,0 +1,104 @@
+name: Gemma 4 Chatbot
+
+on:
+  repository_dispatch:
+    types: [chat-gemma]
+
+env:
+  # خاموش کردن اخطار مربوط به Node.js 20
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  chat_process:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: pip install gradio_client requests
+
+      - name: Process Chat and Send Reply
+        env:
+          PROMPT: ${{ github.event.client_payload.prompt }}
+          FILE_URL: ${{ github.event.client_payload.file_url }}
+          RUN_ID: ${{ github.event.client_payload.run_id }}
+          SPACE_URL: ${{ github.event.client_payload.space_url }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+        run: |
+          python -c "
+          import os, sys, requests
+          from gradio_client import Client, handle_file
+
+          prompt = os.environ.get('PROMPT', '')
+          file_url = os.environ.get('FILE_URL', '')
+          run_id = os.environ.get('RUN_ID')
+          space_url = os.environ.get('SPACE_URL')
+          gh_run_id = os.environ.get('GITHUB_RUN_ID')
+
+          files_to_send = []
+          if file_url:
+              print(f'Downloading attachment: {file_url}')
+              # استخراج پسوند واقعی فایل به صورت مستقیم از URL
+              ext = file_url.split('.')[-1] if '.' in file_url else 'bin'
+              local_filename = f'attachment.{ext}'
+              
+              try:
+                  req = requests.get(file_url, timeout=30)
+                  with open(local_filename, 'wb') as f:
+                      f.write(req.content)
+                  files_to_send.append(handle_file(local_filename))
+              except Exception as e:
+                  print(f'Failed to download file: {e}')
+
+          print('Connecting to Gemma-4 Space...')
+          bot_reply = ''
+          
+          try:
+              client = Client('opera8/gemma-4-e4b-it')
+              message_payload = {'text': prompt, 'files': files_to_send}
+              
+              result = client.predict(
+                  message=message_payload,
+                  thinking=False,
+                  max_new_tokens=4000,
+                  max_soft_tokens=1120,
+                  system_prompt='شما یک دستیار هوش مصنوعی بسیار باهوش، مفید و مودب به زبان فارسی هستید.',
+                  api_name='/generate'
+              )
+              
+              bot_reply = result[0] if isinstance(result, (list, tuple)) else result
+              if isinstance(bot_reply, dict):
+                  bot_reply = bot_reply.get('text', str(bot_reply))
+                  
+          except Exception as e:
+              err_str = str(e)
+              print(f'Generation Error: {err_str}')
+              # تشخیص خطای محدودیت GPU و جایگزین کردن آن با پیام سفارشی
+              if 'ZeroGPU quota' in err_str or 'quota' in err_str.lower():
+                  bot_reply = '⚠️ **پردازش متوقف شد:**\nدرخواست شما طولانی و پرحجم است (پردازش فایل‌های صوتی یا حجیم نیازمند منابع بالایی است و سهمیه سرور موقتاً پر شده است).\n\nلطفاً چند ساعت دیگر امتحان کنید یا درخواست و فایل سبک‌تری ارسال نمایید.'
+              else:
+                  bot_reply = f'⚠️ خطای سرور پردازش: {err_str}'
+
+          print('Uploading response back to Docker Space...')
+          try:
+              with open('response.txt', 'w', encoding='utf-8') as f:
+                  f.write(bot_reply)
+                  
+              with open('response.txt', 'rb') as f:
+                  res = requests.post(f'{space_url}/api/webhook/upload',
+                                   data={'run_id': run_id, 'github_run_id': gh_run_id, 'ext': 'txt'},
+                                   files={'file': f})
+              
+              if res.status_code == 200:
+                  print('SUCCESS!')
+              else:
+                  print(f'Upload Error: {res.text}')
+                  sys.exit(1)
+                  
+          except Exception as e:
+              print(f'CRITICAL ERROR during upload: {e}')
+              sys.exit(1)
+          "
