@@ -25,11 +25,17 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y tor
-          # فعال‌سازی پورت کنترل تور جهت امکان چرخش آی‌پی
+          
+          # پیکربندی پیشرفته فایل torrc جهت بلاک کردن کشورهای شلوغ و افزایش سرعت تغییر آی‌پی
           echo "ControlPort 9051" | sudo tee -a /etc/tor/torrc
           echo "CookieAuthentication 0" | sudo tee -a /etc/tor/torrc
+          echo "ExcludeExitNodes {us},{de},{gb},{fr}" | sudo tee -a /etc/tor/torrc
+          echo "StrictNodes 1" | sudo tee -a /etc/tor/torrc
+          echo "MaxCircuitDirtiness 10" | sudo tee -a /etc/tor/torrc
+          echo "NewCircuitPeriod 10" | sudo tee -a /etc/tor/torrc
+          
           sudo service tor restart
-          sleep 8
+          sleep 10
           curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip || true
 
       - name: Run Persistent Worker
@@ -57,7 +63,7 @@ jobs:
           max_run_duration = 5 * 60 * 60  # 5 hours
 
           def renew_tor_ip():
-              """ارسال سیگنال به پورت ۹۰۵۱ تور برای دریافت آی‌پی جدید"""
+              """ارسال سیگنال به پورت کنترلی تور جهت تغییر هویت"""
               try:
                   s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                   s.settimeout(5)
@@ -76,6 +82,18 @@ jobs:
               except Exception as e:
                   print(f"⚠️ Error renewing Tor IP: {e}", flush=True)
               return False
+
+          def get_current_ip():
+              """دریافت آی‌پی عمومی فعلی پروکسی تور"""
+              try:
+                  proxies = {
+                      'http': 'socks5h://127.0.0.1:9050',
+                      'https': 'socks5h://127.0.0.1:9050'
+                  }
+                  r = requests.get("https://api.ipify.org", proxies=proxies, timeout=12)
+                  return r.text.strip()
+              except Exception as e:
+                  return f"Unknown ({e})"
 
           while time.time() - start_time < max_run_duration:
               try:
@@ -127,12 +145,14 @@ jobs:
                           with open(script_file, "w", encoding="utf-8") as f:
                               f.write(script_content)
                               
-                          max_ip_attempts = 8
+                          max_ip_attempts = 15
                           ip_attempt = 0
                           job_success = False
 
                           while ip_attempt < max_ip_attempts:
                               ip_attempt += 1
+                              current_ip = get_current_ip()
+                              print(f"[{run_id}] Current Tor IP: {current_ip}", flush=True)
                               print(f"Executing script for job {run_id} (IP Attempt {ip_attempt}/{max_ip_attempts})...", flush=True)
                               
                               process = subprocess.Popen(
@@ -170,20 +190,20 @@ jobs:
                               if is_ip_limit:
                                   print(f"[{run_id}] ⚠️ Quota/Rate-limit detected on current Tor IP.", flush=True)
                                   if ip_attempt < max_ip_attempts:
-                                      print(f"[{run_id}] Rotating Tor circuit and sleeping 5s before retrying...", flush=True)
+                                      print(f"[{run_id}] Rotating Tor circuit and sleeping 12s before retrying...", flush=True)
                                       renew_tor_ip()
-                                      time.sleep(5)
+                                      # انتظار ۱۲ ثانیه‌ای برای دور زدن ریت‌لیمیت بومی تور روی دریافت مدار جدید
+                                      time.sleep(12)
                                       continue
                                   else:
                                       print(f"[{run_id}] Max IP rotation attempts reached for this job.", flush=True)
                                       break
                               else:
-                                  # خطاهای دیگر (مانند خطای سینتکس یا خطای منطقی برنامه) نیاز به تغییر آی‌پی ندارند
+                                  # خطاهای دیگر (مانند خطای برنامه یا عدم هماهنگی فیلدها) تغییر آی‌پی نمی‌دهند
                                   print(f"[{run_id}] Job failed due to a non-IP-related error.", flush=True)
                                   break
                                   
                           if not job_success:
-                              # ایجاد خطا تا وب‌هوک به داکر وضعیت شکست را گزارش کند
                               sys.exit(1)
                               
                           continue
