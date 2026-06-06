@@ -25,8 +25,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y tor
-          sudo service tor start
-          sleep 5
+          # فعال‌سازی پورت کنترل تور جهت امکان چرخش آی‌پی
+          echo "ControlPort 9051" | sudo tee -a /etc/tor/torrc
+          echo "CookieAuthentication 0" | sudo tee -a /etc/tor/torrc
+          sudo service tor restart
+          sleep 8
           curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip || true
 
       - name: Run Persistent Worker
@@ -38,6 +41,7 @@ jobs:
           import sys
           import time
           import json
+          import socket
           import requests
           import subprocess
           from datetime import datetime
@@ -51,6 +55,27 @@ jobs:
 
           start_time = time.time()
           max_run_duration = 5 * 60 * 60  # 5 hours
+
+          def renew_tor_ip():
+              """ارسال سیگنال به پورت ۹۰۵۱ تور برای دریافت آی‌پی جدید"""
+              try:
+                  s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                  s.settimeout(5)
+                  s.connect(('127.0.0.1', 9051))
+                  s.send(b'AUTHENTICATE ""\r\n')
+                  res = s.recv(1024)
+                  if b'250' in res:
+                      s.send(b'SIGNAL NEWNYM\r\n')
+                      res2 = s.recv(1024)
+                      if b'250' in res2:
+                          print("🔄 Tor IP successfully rotated/renewed.", flush=True)
+                          s.close()
+                          return True
+                  s.close()
+                  print(f"⚠️ Tor renewal failed. Auth response: {res}", flush=True)
+              except Exception as e:
+                  print(f"⚠️ Error renewing Tor IP: {e}", flush=True)
+              return False
 
           while time.time() - start_time < max_run_duration:
               try:
@@ -102,21 +127,65 @@ jobs:
                           with open(script_file, "w", encoding="utf-8") as f:
                               f.write(script_content)
                               
-                          # Execute the script
-                          print(f"Executing script for job {run_id} through Tor...", flush=True)
-                          process = subprocess.Popen(
-                              [sys.executable, script_file],
-                              env=job_env,
-                              stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT,
-                              text=True
-                          )
-                          
-                          for line in process.stdout:
-                              print(f"[{run_id}] {line.strip()}", flush=True)
+                          max_ip_attempts = 8
+                          ip_attempt = 0
+                          job_success = False
+
+                          while ip_attempt < max_ip_attempts:
+                              ip_attempt += 1
+                              print(f"Executing script for job {run_id} (IP Attempt {ip_attempt}/{max_ip_attempts})...", flush=True)
                               
-                          process.wait()
-                          print(f"Job {run_id} finished with exit code {process.returncode}", flush=True)
+                              process = subprocess.Popen(
+                                  [sys.executable, script_file],
+                                  env=job_env,
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT,
+                                  text=True
+                              )
+                              
+                              output_lines = []
+                              for line in process.stdout:
+                                  print(f"[{run_id}] {line.strip()}", flush=True)
+                                  output_lines.append(line)
+                                  
+                              process.wait()
+                              full_output = "".join(output_lines)
+                              
+                              if process.returncode == 0:
+                                  print(f"Job {run_id} finished successfully.", flush=True)
+                                  job_success = True
+                                  break
+                              
+                              # بررسی بروز خطای سهمیه یا لیمیت آی‌پی
+                              err_lower = full_output.lower()
+                              is_ip_limit = any(term in err_lower for term in [
+                                  "zerogpu quota",
+                                  "exceeded your zerogpu quota",
+                                  "429 too many requests",
+                                  "too many requests",
+                                  "rate limit",
+                                  "quota"
+                              ])
+                              
+                              if is_ip_limit:
+                                  print(f"[{run_id}] ⚠️ Quota/Rate-limit detected on current Tor IP.", flush=True)
+                                  if ip_attempt < max_ip_attempts:
+                                      print(f"[{run_id}] Rotating Tor circuit and sleeping 5s before retrying...", flush=True)
+                                      renew_tor_ip()
+                                      time.sleep(5)
+                                      continue
+                                  else:
+                                      print(f"[{run_id}] Max IP rotation attempts reached for this job.", flush=True)
+                                      break
+                              else:
+                                  # خطاهای دیگر (مانند خطای سینتکس یا خطای منطقی برنامه) نیاز به تغییر آی‌پی ندارند
+                                  print(f"[{run_id}] Job failed due to a non-IP-related error.", flush=True)
+                                  break
+                                  
+                          if not job_success:
+                              # ایجاد خطا تا وب‌هوک به داکر وضعیت شکست را گزارش کند
+                              sys.exit(1)
+                              
                           continue
                           
               except Exception as e:
