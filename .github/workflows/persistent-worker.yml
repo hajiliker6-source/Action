@@ -1,0 +1,129 @@
+name: Persistent Worker
+
+on:
+  repository_dispatch:
+    types: [start-worker]
+  workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  execute:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Base Dependencies
+        run: |
+          pip install gradio_client requests pillow httpx pysocks
+
+      - name: Install and Start Tor
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tor
+          sudo service tor start
+          sleep 5
+          curl --socks5-hostname 127.0.0.1:9050 https://check.torproject.org/api/ip || true
+
+      - name: Run Persistent Worker
+        env:
+          SPACE_URL: ${{ github.event.client_payload.space_url }}
+        run: |
+          cat << 'EOF' > worker.py
+          import os
+          import sys
+          import time
+          import json
+          import requests
+          import subprocess
+          from datetime import datetime
+
+          SPACE_URL = os.environ.get("SPACE_URL")
+          if not SPACE_URL:
+              print("Error: SPACE_URL env var is not set.", flush=True)
+              sys.exit(1)
+
+          print(f"Starting long-running worker for Space: {SPACE_URL}", flush=True)
+
+          start_time = time.time()
+          max_run_duration = 5 * 60 * 60  # 5 hours
+
+          while time.time() - start_time < max_run_duration:
+              try:
+                  # Send heartbeat to Space
+                  try:
+                      requests.post(f"{SPACE_URL}/api/worker/heartbeat", json={}, timeout=10)
+                  except Exception as e:
+                      print(f"Heartbeat failed: {e}", flush=True)
+
+                  # Poll for new jobs
+                  r = requests.post(f"{SPACE_URL}/api/worker/poll", json={}, timeout=15)
+                  if r.status_code == 200:
+                      data = r.json()
+                      if data.get("status") == "success":
+                          run_id = data.get("run_id")
+                          event_type = data.get("event_type")
+                          client_payload = data.get("client_payload", {})
+                          
+                          print(f"[{datetime.now()}] Processing job {run_id} ({event_type})...", flush=True)
+                          
+                          # Prepare environment variables for the job script
+                          job_env = os.environ.copy()
+                          
+                          # Inject Tor proxy to bypass rate limits
+                          job_env["HTTP_PROXY"] = "socks5h://127.0.0.1:9050"
+                          job_env["HTTPS_PROXY"] = "socks5h://127.0.0.1:9050"
+                          
+                          # Map client_payload to environment variables
+                          for key, val in client_payload.items():
+                              if key != "data":
+                                  job_env[key.upper()] = str(val)
+                          
+                          payload_data = client_payload.get("data", {})
+                          if isinstance(payload_data, dict):
+                              for key, val in payload_data.items():
+                                  if key == "image_urls":
+                                      job_env["IMAGE_URLS"] = json.dumps(val)
+                                  else:
+                                      job_env[key.upper()] = str(val)
+                          
+                          # Extract the script
+                          script_content = payload_data.get("script") or client_payload.get("script")
+                          if not script_content:
+                              print(f"Error: No script found in payload for job {run_id}", flush=True)
+                              continue
+                              
+                          # Write script to temporary file
+                          script_file = "run_job.py"
+                          with open(script_file, "w", encoding="utf-8") as f:
+                              f.write(script_content)
+                              
+                          # Execute the script
+                          print(f"Executing script for job {run_id} through Tor...", flush=True)
+                          process = subprocess.Popen(
+                              [sys.executable, script_file],
+                              env=job_env,
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT,
+                              text=True
+                          )
+                          
+                          for line in process.stdout:
+                              print(f"[{run_id}] {line.strip()}", flush=True)
+                              
+                          process.wait()
+                          print(f"Job {run_id} finished with exit code {process.returncode}", flush=True)
+                          continue
+                          
+              except Exception as e:
+                  print(f"Error in worker loop: {e}", flush=True)
+                  
+              time.sleep(5)
+
+          print("Worker reached maximum run duration. Exiting.", flush=True)
+          EOF
+          python worker.py
