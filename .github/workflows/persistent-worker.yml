@@ -19,7 +19,7 @@ jobs:
 
       - name: Install Base Dependencies
         run: |
-          pip install gradio_client requests pillow httpx pysocks
+          pip install "gradio_client" "requests[socks]" "pillow" "httpx[socks]" pysocks socksio
 
       - name: Install and Start Tor
         run: |
