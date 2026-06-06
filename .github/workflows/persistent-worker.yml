@@ -23,9 +23,12 @@ jobs:
 
       - name: Install and Start Cloudflare WARP
         run: |
-          # افزودن مخازن رسمی کلودفلر وارپ برای اوبونتو ۲۴.۰۴ (Noble)
+          # افزودن کلید GPG کلودفلر
           curl -fsSL https://pkg.cloudflareclient.com/pubkey.gpg | sudo gpg --yes --dearmor --output /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg
-          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/cloudflare-warp/ noble main" | sudo tee /etc/apt/sources.list.d/cloudflare-warp.list
+          
+          # افزودن مخزن سازگار jammy (جهت جلوگیری از خطای ۴۰۴ روی نسخه noble)
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-warp-archive-keyring.gpg] https://pkg.cloudflareclient.com/ jammy main" | sudo tee /etc/apt/sources.list.d/cloudflare-client.list
+          
           sudo apt-get update
           sudo apt-get install cloudflare-warp -y
           
