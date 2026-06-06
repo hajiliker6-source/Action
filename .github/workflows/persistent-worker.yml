@@ -145,8 +145,8 @@ jobs:
                                   print(f"Error: No script found in payload for job {run_id}", flush=True)
                                   continue
                                   
-                              # ایجاد فایل اسکریپت منحصربه‌فرد برای این کارگر جهت عدم تداخل
-                              script_file = f"run_job_{run_id}.py"
+                              # ایجاد فایل اسکریپت منحصربه‌فرد برای این کارگر جهت عدم تداخل با بقیه نخ‌ها
+                              script_file = f"run_job_{run_id}_w{worker_index}.py"
                               with open(script_file, "w", encoding="utf-8") as f:
                                   f.write(script_content)
                                   
