@@ -26,10 +26,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y tor
           
-          # پیکربندی پیشرفته فایل torrc جهت بلاک کردن کشورهای شلوغ و افزایش سرعت تغییر آی‌پی
+          # فیلتر کردن شدید کشورهای پرمصرف جهت هدایت تور به سمت کشورهای خلوت با سهمیه بکر
           echo "ControlPort 9051" | sudo tee -a /etc/tor/torrc
           echo "CookieAuthentication 0" | sudo tee -a /etc/tor/torrc
-          echo "ExcludeExitNodes {us},{de},{gb},{fr}" | sudo tee -a /etc/tor/torrc
+          echo "ExcludeExitNodes {us},{de},{gb},{fr},{nl},{ru},{cn},{ca},{sg},{ua}" | sudo tee -a /etc/tor/torrc
           echo "StrictNodes 1" | sudo tee -a /etc/tor/torrc
           echo "MaxCircuitDirtiness 10" | sudo tee -a /etc/tor/torrc
           echo "NewCircuitPeriod 10" | sudo tee -a /etc/tor/torrc
@@ -148,10 +148,20 @@ jobs:
                           max_ip_attempts = 15
                           ip_attempt = 0
                           job_success = False
+                          last_ip = None
 
                           while ip_attempt < max_ip_attempts:
                               ip_attempt += 1
                               current_ip = get_current_ip()
+                              
+                              # تأیید فیزیکی تغییر آی‌پی و جلوگیری از هدر رفتن تلاش روی آی‌پی تکراری
+                              if last_ip and current_ip == last_ip and ip_attempt > 1:
+                                  print(f"[{run_id}] IP did not change ({current_ip}). Re-requesting Tor circuit...", flush=True)
+                                  renew_tor_ip()
+                                  time.sleep(12)
+                                  current_ip = get_current_ip()
+                                  
+                              last_ip = current_ip
                               print(f"[{run_id}] Current Tor IP: {current_ip}", flush=True)
                               print(f"Executing script for job {run_id} (IP Attempt {ip_attempt}/{max_ip_attempts})...", flush=True)
                               
@@ -169,38 +179,21 @@ jobs:
                                   output_lines.append(line)
                                   
                               process.wait()
-                              full_output = "".join(output_lines)
                               
                               if process.returncode == 0:
                                   print(f"Job {run_id} finished successfully.", flush=True)
                                   job_success = True
                                   break
                               
-                              # بررسی بروز خطای سهمیه یا لیمیت آی‌پی
-                              err_lower = full_output.lower()
-                              is_ip_limit = any(term in err_lower for term in [
-                                  "zerogpu quota",
-                                  "exceeded your zerogpu quota",
-                                  "429 too many requests",
-                                  "too many requests",
-                                  "rate limit",
-                                  "quota"
-                              ])
-                              
-                              if is_ip_limit:
-                                  print(f"[{run_id}] ⚠️ Quota/Rate-limit detected on current Tor IP.", flush=True)
-                                  if ip_attempt < max_ip_attempts:
-                                      print(f"[{run_id}] Rotating Tor circuit and sleeping 12s before retrying...", flush=True)
-                                      renew_tor_ip()
-                                      # انتظار ۱۲ ثانیه‌ای برای دور زدن ریت‌لیمیت بومی تور روی دریافت مدار جدید
-                                      time.sleep(12)
-                                      continue
-                                  else:
-                                      print(f"[{run_id}] Max IP rotation attempts reached for this job.", flush=True)
-                                      break
+                              # هرگونه شکست در اجرای اسکریپت (کد خروجی غیر از صفر) به عنوان مشکل شبکه یا لیمیت آی‌پی تلقی می‌شود
+                              print(f"[{run_id}] ⚠️ Job failed (Exit Code {process.returncode}). Assuming IP rate-limit/quota issue.", flush=True)
+                              if ip_attempt < max_ip_attempts:
+                                  print(f"[{run_id}] Rotating Tor circuit and sleeping 12s before retrying...", flush=True)
+                                  renew_tor_ip()
+                                  time.sleep(12)
+                                  continue
                               else:
-                                  # خطاهای دیگر (مانند خطای برنامه یا عدم هماهنگی فیلدها) تغییر آی‌پی نمی‌دهند
-                                  print(f"[{run_id}] Job failed due to a non-IP-related error.", flush=True)
+                                  print(f"[{run_id}] Max IP rotation attempts reached for this job.", flush=True)
                                   break
                                   
                           if not job_success:
