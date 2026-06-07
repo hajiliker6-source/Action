@@ -112,33 +112,21 @@ jobs:
               return None
 
           def renew_warp_ip(worker_index, socks_port):
-              """حذف هویت قبلی و ثبت ثبت‌نام جدید در کلودفلر بدون راه‌اندازی مجدد کانتینر داکر جهت چرخش سریع ۲ ثانیه‌ای"""
+              """حذف فایل ثبت‌نام قبلی و ری‌استارت فوق‌العاده سریع کانتینر جهت دریافت آی‌پی کاملاً تازه بدون سربار سنگین داکر"""
               try:
-                  # ۱. پاک کردن ثبت‌نام و هویت قبلی وارپ جهت آزاد کردن آی‌پی مسدود شده
-                  subprocess.run(f"docker exec warp{worker_index} warp-cli --accept-tos registration delete", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  time.sleep(0.5)
-                  # ۲. ایجاد فوری ثبت‌نام کاملاً تازه با آی‌پی جدید کلودفلر
-                  subprocess.run(f"docker exec warp{worker_index} warp-cli --accept-tos registration new", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  time.sleep(0.5)
-                  # ۳. برقراری اتصال مجدد تونل
-                  subprocess.run(f"docker exec warp{worker_index} warp-cli --accept-tos connect", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  # ۱. پاک کردن فایل ثبت‌نام فیزیکی درون کانتینر تا اسکریپت ورودی داکر مجبور به دریافت هویت جدید شود
+                  subprocess.run(f"docker exec warp{worker_index} rm -f /var/lib/cloudflare-warp/reg.json", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  time.sleep(0.2)
+                  
+                  # ۲. ری‌استارت بسیار سریع و بدون سربار کانتینر موجود
+                  subprocess.run(f"docker restart warp{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   
                   current_ip = check_and_wait_for_warp(socks_port)
                   if current_ip:
-                      print(f"🔄 [Worker {worker_index}] Cloudflare WARP IP rotated successfully via CLI. New IP: {current_ip}", flush=True)
+                      print(f"🔄 [Worker {worker_index}] Cloudflare WARP IP rotated successfully. New IP: {current_ip}", flush=True)
                       return current_ip
               except Exception as e:
-                  print(f"⚠️ [Worker {worker_index}] Error renewing WARP IP via CLI: {e}", flush=True)
-              
-              # زاپاس اضطراری: در صورت عدم پاسخگویی CLI، کانتینر موجود بدون حذف و بازسازی، ری‌استارت بسیار سریع می‌شود
-              try:
-                  print(f"🔄 [Worker {worker_index}] Fallback: Restarting container warp{worker_index}...", flush=True)
-                  subprocess.run(f"docker restart warp{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  current_ip = check_and_wait_for_warp(socks_port)
-                  if current_ip:
-                      return current_ip
-              except Exception as ex:
-                  print(f"⚠️ [Worker {worker_index}] Fallback restart failed: {ex}", flush=True)
+                  print(f"⚠️ [Worker {worker_index}] Error renewing WARP IP: {e}", flush=True)
               return None
 
           def run_worker_thread(worker_index, socks_port):
