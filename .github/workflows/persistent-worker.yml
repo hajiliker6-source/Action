@@ -46,11 +46,11 @@ jobs:
 
       - name: Start 20 Parallel WARP Containers
         run: |
-          # اجرای سریع ۲۰ کانتینر داکر وارپ از روی ایمیج کش شده
+          # دانلود و اجرای ۲۰ کلاینت ایزوله کلودفلر وارپ روی پورت‌های ۴۰۰۱ تا ۴۰۲۰ به صورت پله‌ای
           for i in {1..20}; do
             PORT=$((4000 + i))
             docker run -d --name warp$i --cap-add=NET_ADMIN -p $PORT:1080 caomingjun/warp
-            echo "Started WARP Instance $i on Port $PORT"
+            sleep 0.5
           done
           
           # زمان کوتاه برای ثبات اتصالات
@@ -86,27 +86,38 @@ jobs:
           max_run_duration = 5 * 60 * 60  # 5 hours
           github_run_id = os.environ.get("GITHUB_RUN_ID", "local-worker")
 
+          # ۱. تشخیص آی‌پی مستقیم هاست برای جلوگیری از تداخل فلو وارپ
+          HOST_IP = "Unknown"
+          try:
+              HOST_IP = requests.get("https://api.ipify.org", timeout=5).text.strip()
+              print(f"Host direct IP detected: {HOST_IP}", flush=True)
+          except Exception as e:
+              print(f"Failed to detect Host IP: {e}", flush=True)
+
           def check_and_wait_for_warp(socks_port):
               """صبر کردن برای فعال شدن کامل کانتینر داکر وارپ پس از ریست"""
-              for _ in range(12):
+              for _ in range(15):
                   try:
                       proxies = {
                           'http': f'socks5h://127.0.0.1:{socks_port}',
                           'https': f'socks5h://127.0.0.1:{socks_port}'
                       }
-                      r = requests.get("https://api.ipify.org", proxies=proxies, timeout=5)
+                      r = requests.get("https://api.ipify.org", proxies=proxies, timeout=3)
                       if r.status_code == 200:
-                          return r.text.strip()
+                          ip = r.text.strip()
+                          # اگر آی‌پی برابر آی‌پی مستقیم هاست بود یعنی وارپ هنوز وصل نشده و ترافیک لوکال رد می‌شود
+                          if ip != HOST_IP and ip != "Unknown":
+                              return ip
                   except:
                       pass
-                  time.sleep(2)
+                  time.sleep(1)
               return None
 
           def renew_warp_ip(worker_index, socks_port):
               """حذف کانتینر قبلی و اجرای مجدد آن برای دریافت آی‌پی کاملاً تازه از کلودفلر"""
               try:
                   subprocess.run(f"docker rm -f warp{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  time.sleep(1)
+                  time.sleep(0.5)
                   subprocess.run(f"docker run -d --name warp{worker_index} --cap-add=NET_ADMIN -p {socks_port}:1080 caomingjun/warp", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   current_ip = check_and_wait_for_warp(socks_port)
                   if current_ip:
@@ -217,6 +228,7 @@ jobs:
                                   if ip_attempt < max_ip_attempts:
                                       print(f"[{run_id}] Rotating Cloudflare WARP container and retrying...", flush=True)
                                       renew_warp_ip(worker_index, socks_port)
+                                      time.sleep(2)
                                       continue
                                   else:
                                       print(f"[{run_id}] Max IP rotation attempts reached for this job.", flush=True)
