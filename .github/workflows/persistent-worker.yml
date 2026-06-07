@@ -87,19 +87,28 @@ jobs:
           github_run_id = os.environ.get("GITHUB_RUN_ID", "local-worker")
 
           def check_and_wait_for_warp(socks_port):
-              """صبر کردن برای فعال شدن کامل کانتینر داکر وارپ پس از ریست"""
-              for _ in range(12):
+              """صبر کردن برای فعال شدن کامل کانتینر داکر وارپ و اطمینان از تغییر واقعی IP به کلودفلر"""
+              for _ in range(15):
                   try:
                       proxies = {
                           'http': f'socks5h://127.0.0.1:{socks_port}',
                           'https': f'socks5h://127.0.0.1:{socks_port}'
                       }
-                      r = requests.get("https://api.ipify.org", proxies=proxies, timeout=5)
+                      r = requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies=proxies, timeout=3)
                       if r.status_code == 200:
-                          return r.text.strip()
+                          lines = r.text.split("\n")
+                          data = {}
+                          for line in lines:
+                              if "=" in line:
+                                  parts = line.strip().split("=", 1)
+                                  if len(parts) == 2:
+                                      data[parts[0]] = parts[1]
+                          # حتماً باید سیستم تونل کلودفلر فعال باشد تا آی‌پی سرور اصلی گیت‌هاب نشت نکند
+                          if data.get("warp") in ["on", "plus"] and data.get("ip"):
+                              return data.get("ip")
                   except:
                       pass
-                  time.sleep(2)
+                  time.sleep(1)
               return None
 
           def renew_warp_ip(worker_index, socks_port):
@@ -180,13 +189,20 @@ jobs:
 
                               while ip_attempt < max_ip_attempts:
                                   ip_attempt += 1
-                                  current_ip = check_and_wait_for_warp(socks_port) or "Unknown"
+                                  current_ip = check_and_wait_for_warp(socks_port)
+                                  
+                                  if not current_ip:
+                                      print(f"[{run_id}] ⚠️ WARP connection failed or is inactive. Rotating WARP container and retrying...", flush=True)
+                                      renew_warp_ip(worker_index, socks_port)
+                                      continue
                                   
                                   # تایید تغییر واقعی آدرس آی‌پی برای بهینه‌سازی پردازش
-                                  if last_ip and current_ip == last_ip and ip_attempt > 1:
+                                  if last_ip and current_ip == last_ip:
                                       print(f"[{run_id}] IP did not change ({current_ip}). Re-requesting WARP container reset...", flush=True)
                                       renew_warp_ip(worker_index, socks_port)
-                                      current_ip = check_and_wait_for_warp(socks_port) or "Unknown"
+                                      current_ip = check_and_wait_for_warp(socks_port)
+                                      if not current_ip:
+                                          continue
                                       
                                   last_ip = current_ip
                                   print(f"[{run_id}] Current Cloudflare WARP IP: {current_ip}", flush=True)
