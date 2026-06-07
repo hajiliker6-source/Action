@@ -86,6 +86,10 @@ jobs:
           max_run_duration = 5 * 60 * 60  # 5 hours
           github_run_id = os.environ.get("GITHUB_RUN_ID", "local-worker")
 
+          # ساخت حافظه موقت بلک‌لیست آی‌پی‌های مسدود شده به صورت سراسری و ایمن بین تمام نخ‌ها
+          blacklisted_ips = set()
+          blacklist_lock = threading.Lock()
+
           def check_and_wait_for_warp(socks_port):
               """صبر کردن برای فعال شدن کامل کانتینر داکر وارپ و اطمینان از تغییر واقعی IP به کلودفلر"""
               for _ in range(15):
@@ -141,7 +145,22 @@ jobs:
                       except Exception as e:
                           pass
 
-                      # Poll for new jobs
+                      # ۱. بررسی زنده بودن و عدم بلک‌لیست بودن آی‌پی فعلی قبل از هرگونه دریافت تسک جدید
+                      current_ip = check_and_wait_for_warp(socks_port)
+                      
+                      with blacklist_lock:
+                          is_blacklisted = current_ip in blacklisted_ips if current_ip else True
+
+                      if not current_ip or is_blacklisted:
+                          if is_blacklisted and current_ip:
+                              print(f"[{worker_index}] ⚠️ Current IP {current_ip} is blacklisted. Rotating in background...", flush=True)
+                          else:
+                              print(f"[{worker_index}] ⚠️ WARP offline. Initializing/reconnecting in background...", flush=True)
+                          renew_warp_ip(worker_index, socks_port)
+                          time.sleep(2)
+                          continue
+
+                      # ۲. اگر آی‌پی کاملاً سالم و آماده بود، اقدام به نظرسنجی و دریافت کار جدید می‌کنیم
                       r = requests.post(f"{SPACE_URL}/api/worker/poll", json={}, timeout=15)
                       if r.status_code == 200:
                           data = r.json()
@@ -153,12 +172,10 @@ jobs:
                               if not client_payload or client_payload == "success":
                                   client_payload = data.get("client_payload", {})
 
-                              print(f"[{run_id}] Thread {worker_index} grabbed job ({event_type})", flush=True)
+                              print(f"[{run_id}] Thread {worker_index} grabbed job ({event_type}) using clean IP: {current_ip}", flush=True)
                               
                               # تنظیمات محیطی استاندارد کارگر
                               job_env = os.environ.copy()
-                              
-                              # ارجاع ترافیک پردازش این کارگر به پورت پروکسی وارپ اختصاصی خودش
                               job_env["HTTP_PROXY"] = f"socks5h://127.0.0.1:{socks_port}"
                               job_env["HTTPS_PROXY"] = f"socks5h://127.0.0.1:{socks_port}"
                               
@@ -186,84 +203,61 @@ jobs:
                               with open(script_file, "w", encoding="utf-8") as f:
                                   f.write(script_content)
                                   
-                              max_ip_attempts = 15
-                              ip_attempt = 0
-                              job_success = False
-                              last_ip = None
-
-                              while ip_attempt < max_ip_attempts:
-                                  ip_attempt += 1
-                                  current_ip = check_and_wait_for_warp(socks_port)
+                              print(f"Executing script for job {run_id} (IP: {current_ip})...", flush=True)
+                              
+                              process = subprocess.Popen(
+                                  [sys.executable, script_file],
+                                  env=job_env,
+                                  stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT,
+                                  text=True
+                              )
+                              
+                              output_lines = []
+                              for line in process.stdout:
+                                  print(f"[{run_id}] {line.strip()}", flush=True)
+                                  output_lines.append(line)
                                   
-                                  if not current_ip:
-                                      print(f"[{run_id}] ⚠️ WARP connection failed or is inactive. Rotating WARP container and retrying...", flush=True)
-                                      renew_warp_ip(worker_index, socks_port)
-                                      continue
-                                  
-                                  # تایید تغییر واقعی آدرس آی‌پی برای بهینه‌سازی پردازش
-                                  if last_ip and current_ip == last_ip:
-                                      print(f"[{run_id}] IP did not change ({current_ip}). Re-requesting WARP container reset...", flush=True)
-                                      renew_warp_ip(worker_index, socks_port)
-                                      current_ip = check_and_wait_for_warp(socks_port)
-                                      if not current_ip:
-                                          continue
-                                      
-                                  last_ip = current_ip
-                                  print(f"[{run_id}] Current Cloudflare WARP IP: {current_ip}", flush=True)
-                                  print(f"Executing script for job {run_id} (IP Attempt {ip_attempt}/{max_ip_attempts})...", flush=True)
-                                  
-                                  process = subprocess.Popen(
-                                      [sys.executable, script_file],
-                                      env=job_env,
-                                      stdout=subprocess.PIPE,
-                                      stderr=subprocess.STDOUT,
-                                      text=True
-                                  )
-                                  
-                                  output_lines = []
-                                  for line in process.stdout:
-                                      print(f"[{run_id}] {line.strip()}", flush=True)
-                                      output_lines.append(line)
-                                      
-                                  process.wait()
-                                  
-                                  if process.returncode == 0:
-                                      print(f"Job {run_id} finished successfully.", flush=True)
-                                      job_success = True
-                                      break
-                                  
-                                  # بروز خطا در فرآیند انتشار یا دریافت خروجی (خطای خروجی غیر از صفر)
-                                  print(f"[{run_id}] ⚠️ Job failed (Exit Code {process.returncode}). Assuming IP rate-limit/quota issue.", flush=True)
-                                  if ip_attempt < max_ip_attempts:
-                                      print(f"[{run_id}] Rotating Cloudflare WARP container and retrying...", flush=True)
-                                      renew_warp_ip(worker_index, socks_port)
-                                      continue
-                                  else:
-                                      print(f"[{run_id}] Max IP rotation attempts reached for this job.", flush=True)
-                                      break
-                                      
+                              process.wait()
+                              
                               try:
                                   os.remove(script_file)
                               except:
                                   pass
 
-                              if not job_success:
-                                  requests.post(
-                                      f"{SPACE_URL}/api/webhook/fail",
-                                      json={
-                                          "run_id": run_id,
-                                          "error": "All Cloudflare WARP IP rotation attempts failed due to quota/rate-limit blocks.",
-                                          "github_run_id": os.environ.get("GITHUB_RUN_ID", "")
-                                      },
-                                      timeout=15
-                                  )
+                              if process.returncode == 0:
+                                  print(f"Job {run_id} finished successfully.", flush=True)
+                              else:
+                                  # بروز خطا (احتمالاً محدودیت سهمیه آی‌پی)
+                                  print(f"[{run_id}] ⚠️ Job failed (Exit Code {process.returncode}). Blacklisting IP {current_ip} and releasing job back to queue...", flush=True)
+                                  
+                                  # افزودن آی‌پی جاری به بلک‌لیست سراسری برای ممانعت از استفاده توسط بقیه نخ‌ها
+                                  if current_ip:
+                                      with blacklist_lock:
+                                          blacklisted_ips.add(current_ip)
+                                  
+                                  # آزادسازی فوری تسک جهت دریافت توسط نخ‌های آماده و تمیز دیگر
+                                  try:
+                                      requests.post(
+                                          f"{SPACE_URL}/api/webhook/fail",
+                                          json={
+                                              "run_id": run_id,
+                                              "error": f"IP rate-limit/quota issue on {current_ip}. Released for Hot-Swap retry.",
+                                              "github_run_id": os.environ.get("GITHUB_RUN_ID", "")
+                                          },
+                                          timeout=15
+                                      )
+                                  except Exception as ex:
+                                      print(f"Error releasing job back to server: {ex}", flush=True)
+                                      
+                                  # چرخاندن آی‌پی این نخ در پس‌زمینه به صورت غیرهمزمان تا دوباره تمیز و گرم شود
+                                  renew_warp_ip(worker_index, socks_port)
                                   
                               continue
-                              
                   except Exception as e:
                       print(f"[{worker_index}] Error in thread loop: {e}", flush=True)
                       
-                  time.sleep(5)
+                  time.sleep(2)
 
           # راه‌اندازی ۲۰ نخ کارگر موازی به همراه اختصاص پورت‌های داکر مجزا
           threads = []
