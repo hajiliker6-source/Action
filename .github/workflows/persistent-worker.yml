@@ -160,8 +160,8 @@ jobs:
                           time.sleep(2)
                           continue
 
-                      # ۲. اگر آی‌پی کاملاً سالم و آماده بود، اقدام به نظرسنجی و دریافت کار جدید می‌کنیم
-                      r = requests.post(f"{SPACE_URL}/api/worker/poll", json={}, timeout=15)
+                      # ۲. اگر آی‌پی کاملاً سالم و آماده بود، اقدام به نظرسنجی مجهز به شناسه برای ثبت توزیع چرخشی می‌کنیم
+                      r = requests.post(f"{SPACE_URL}/api/worker/poll", json={"worker_id": thread_worker_id}, timeout=15)
                       if r.status_code == 200:
                           data = r.json()
                           if data.get("status") == "success":
