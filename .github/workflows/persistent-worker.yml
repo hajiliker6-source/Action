@@ -46,14 +46,14 @@ jobs:
 
       - name: Start 20 Parallel WARP Containers
         run: |
-          # دانلود و اجرای ۲۰ کلاینت ایزوله کلودفلر وارپ روی پورت‌های ۴۰۰۱ تا ۴۰۲۰ به صورت پله‌ای
+          # دانلود و اجرای سریع ۲۰ کانتینر داکر وارپ روی پورت‌های ۴۰۰۱ تا ۴۰۲۰ به صورت پله‌ای
           for i in {1..20}; do
             PORT=$((4000 + i))
             docker run -d --name warp$i --cap-add=NET_ADMIN -p $PORT:1080 caomingjun/warp
             sleep 0.5
           done
           
-          # زمان کوتاه برای ثبات اتصالات
+          # زمان ثبات اولیه برای لود شدن کارت شبکه‌ها
           sleep 12
           
           # تست پورت‌های اول و دوم جهت تایید نهایی تغییر آی‌پی‌ها
@@ -87,7 +87,7 @@ jobs:
           max_run_duration = 5 * 60 * 60  # 5 hours
           github_run_id = os.environ.get("GITHUB_RUN_ID", "local-worker")
 
-          # ۱. تشخیص آی‌پی مستقیم هاست برای جلوگیری از تداخل فلو وارپ
+          # تشخیص آی‌پی مستقیم هاست برای جلوگیری از تداخل فلو وارپ
           HOST_IP = "Unknown"
           try:
               HOST_IP = requests.get("https://api.ipify.org", timeout=5).text.strip()
@@ -115,21 +115,19 @@ jobs:
               return None
 
           def renew_warp_ip(worker_index, socks_port):
-              """تغییر سریع هویت و سوییچ کردن آی‌پی انی‌کست وارپ برای دریافت قطعی آی‌پی جدید"""
+              """بازسازی کامل کانتینر داکر و شکستن چسبندگی آی‌پی با سوییچ انی‌کست"""
               try:
                   container_name = f"warp{worker_index}"
                   
-                  # قطع اتصال موقت
-                  subprocess.run(f"docker exec {container_name} warp-cli --accept-tos disconnect", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  # ۱. حذف کامل کانتینر خراب/قدیمی
+                  subprocess.run(f"docker rm -f {container_name}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  time.sleep(1.5) # زمان کافی برای قطع اتصال فیزیکی آژور
                   
-                  # ابطال هویت قدیمی
-                  subprocess.run(f"docker exec {container_name} warp-cli --accept-tos registration delete", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  time.sleep(0.5)
+                  # ۲. ساخت کانتینر کاملاً تمیز و تازه نفس
+                  subprocess.run(f"docker run -d --name {container_name} --cap-add=NET_ADMIN -p {socks_port}:1080 caomingjun/warp", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  time.sleep(3) # زمان کوتاه برای لود شدن سرویس وارپ داخل کانتینر
                   
-                  # ثبت هویت جدید
-                  subprocess.run(f"docker exec {container_name} warp-cli --accept-tos registration new", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  
-                  # شکستن چسبندگی پورت UDP با چرخاندن آدرس‌های انی‌کست کلودفلر (شکست قفل آی‌پی تکراری)
+                  # ۳. سوییچ کردن انی‌کست مقصد برای تغییر قطعی رنج آی‌پی
                   endpoints = [
                       "162.159.192.1:2408",
                       "162.159.193.1:2408",
@@ -140,23 +138,16 @@ jobs:
                   selected_endpoint = random.choice(endpoints)
                   subprocess.run(f"docker exec {container_name} warp-cli --accept-tos tunnel endpoint set {selected_endpoint}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   
-                  # اتصال مجدد
+                  # ۴. اتصال مجدد
                   subprocess.run(f"docker exec {container_name} warp-cli --accept-tos connect", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   
+                  # ۵. انتظار برای دریافت آی‌پی جدید
                   current_ip = check_and_wait_for_warp(socks_port)
                   if current_ip:
-                      print(f"🔄 [Worker {worker_index}] Cloudflare WARP IP rotated successfully to: {current_ip} (Endpoint: {selected_endpoint})", flush=True)
+                      print(f"🔄 [Worker {worker_index}] Fresh WARP IP established: {current_ip} (Endpoint: {selected_endpoint})", flush=True)
                       return current_ip
               except Exception as e:
-                  print(f"⚠️ [Worker {worker_index}] Error renewing WARP IP: {e}. Falling back to container recreation...", flush=True)
-                  # بازگشت به روش بازسازی کانتینر در صورت بروز هرگونه خطای احتمالی
-                  try:
-                      subprocess.run(f"docker rm -f warp{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                      time.sleep(0.5)
-                      subprocess.run(f"docker run -d --name warp{worker_index} --cap-add=NET_ADMIN -p {socks_port}:1080 caomingjun/warp", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                      return check_and_wait_for_warp(socks_port)
-                  except Exception as ex:
-                      print(f"⚠️ [Worker {worker_index}] Severe fallback error: {ex}", flush=True)
+                  print(f"⚠️ [Worker {worker_index}] Error in secure renew: {e}", flush=True)
               return None
 
           def run_worker_thread(worker_index, socks_port):
