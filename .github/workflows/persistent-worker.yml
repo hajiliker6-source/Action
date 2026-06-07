@@ -46,14 +46,14 @@ jobs:
 
       - name: Start 20 Parallel WARP Containers
         run: |
-          # دانلود و اجرای سریع ۲۰ کانتینر داکر وارپ روی پورت‌های ۴۰۰۱ تا ۴۰۲۰ به صورت پله‌ای
+          # اجرای سریع ۲۰ کانتینر داکر وارپ از روی ایمیج کش شده
           for i in {1..20}; do
             PORT=$((4000 + i))
             docker run -d --name warp$i --cap-add=NET_ADMIN -p $PORT:1080 caomingjun/warp
-            sleep 0.5
+            echo "Started WARP Instance $i on Port $PORT"
           done
           
-          # زمان ثبات اولیه برای لود شدن کارت شبکه‌ها
+          # زمان کوتاه برای ثبات اتصالات
           sleep 12
           
           # تست پورت‌های اول و دوم جهت تایید نهایی تغییر آی‌پی‌ها
@@ -73,7 +73,6 @@ jobs:
           import requests
           import subprocess
           import threading
-          import random
           from datetime import datetime
 
           SPACE_URL = os.environ.get("SPACE_URL")
@@ -87,63 +86,31 @@ jobs:
           max_run_duration = 5 * 60 * 60  # 5 hours
           github_run_id = os.environ.get("GITHUB_RUN_ID", "local-worker")
 
-          # تشخیص آی‌پی مستقیم هاست برای جلوگیری از تداخل فلو وارپ
-          HOST_IP = "Unknown"
-          try:
-              HOST_IP = requests.get("https://api.ipify.org", timeout=5).text.strip()
-              print(f"Host direct IP detected: {HOST_IP}", flush=True)
-          except Exception as e:
-              print(f"Failed to detect Host IP: {e}", flush=True)
-
           def check_and_wait_for_warp(socks_port):
               """صبر کردن برای فعال شدن کامل کانتینر داکر وارپ پس از ریست"""
-              for _ in range(15):
+              for _ in range(12):
                   try:
                       proxies = {
                           'http': f'socks5h://127.0.0.1:{socks_port}',
                           'https': f'socks5h://127.0.0.1:{socks_port}'
                       }
-                      r = requests.get("https://api.ipify.org", proxies=proxies, timeout=3)
+                      r = requests.get("https://api.ipify.org", proxies=proxies, timeout=5)
                       if r.status_code == 200:
-                          ip = r.text.strip()
-                          # اگر آی‌پی برابر آی‌پی مستقیم هاست بود یعنی وارپ هنوز وصل نشده و ترافیک لوکال رد می‌شود
-                          if ip != HOST_IP and ip != "Unknown":
-                              return ip
+                          return r.text.strip()
                   except:
                       pass
-                  time.sleep(1)
+                  time.sleep(2)
               return None
 
           def renew_warp_ip(worker_index, socks_port):
               """حذف کانتینر قبلی و اجرای مجدد آن برای دریافت آی‌پی کاملاً تازه از کلودفلر"""
               try:
-                  container_name = f"warp{worker_index}"
-                  
-                  # ۱. حذف کامل کانتینر قدیمی برای جلوگیری از خطای Host unreachable
-                  subprocess.run(f"docker rm -f {container_name}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  time.sleep(1.5) # زمان خواب کوتاه جهت قطع موقت اتصال فیزیکی آژور
-                  
-                  # ۲. ساخت کانتینر کاملاً تمیز و تازه نفس
-                  subprocess.run(f"docker run -d --name {container_name} --cap-add=NET_ADMIN -p {socks_port}:1080 caomingjun/warp", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  time.sleep(2.5) # انتظار کوتاه برای لود شدن دیمن داخلی داکر
-                  
-                  # ۳. شکستن چسبندگی پورت UDP با چرخاندن آدرس‌های انی‌کست کلودفلر قبل از دست‌دهی نهایی
-                  endpoints = [
-                      "162.159.192.1:2408",
-                      "162.159.193.1:2408",
-                      "162.159.194.1:2408",
-                      "162.159.195.1:2408",
-                      "162.159.204.1:2408"
-                  ]
-                  selected_endpoint = random.choice(endpoints)
-                  subprocess.run(f"docker exec {container_name} warp-cli --accept-tos tunnel endpoint set {selected_endpoint}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  
-                  # ۴. اتصال مجدد
-                  subprocess.run(f"docker exec {container_name} warp-cli --accept-tos connect", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  
+                  subprocess.run(f"docker rm -f warp{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  time.sleep(1)
+                  subprocess.run(f"docker run -d --name warp{worker_index} --cap-add=NET_ADMIN -p {socks_port}:1080 caomingjun/warp", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   current_ip = check_and_wait_for_warp(socks_port)
                   if current_ip:
-                      print(f"🔄 [Worker {worker_index}] Cloudflare WARP IP rotated successfully. New IP: {current_ip} (Endpoint: {selected_endpoint})", flush=True)
+                      print(f"🔄 [Worker {worker_index}] Cloudflare WARP IP rotated successfully. New IP: {current_ip}", flush=True)
                       return current_ip
               except Exception as e:
                   print(f"⚠️ [Worker {worker_index}] Error renewing WARP IP: {e}", flush=True)
@@ -215,8 +182,8 @@ jobs:
                                   ip_attempt += 1
                                   current_ip = check_and_wait_for_warp(socks_port) or "Unknown"
                                   
-                                  # تایید تغییر واقعی آدرس آی‌پی برای بهینه‌سازی پردازش (ممانعت از لوپ تکراری Unknown)
-                                  if last_ip and current_ip == last_ip and current_ip != "Unknown" and ip_attempt > 1:
+                                  # تایید تغییر واقعی آدرس آی‌پی برای بهینه‌سازی پردازش
+                                  if last_ip and current_ip == last_ip and ip_attempt > 1:
                                       print(f"[{run_id}] IP did not change ({current_ip}). Re-requesting WARP container reset...", flush=True)
                                       renew_warp_ip(worker_index, socks_port)
                                       current_ip = check_and_wait_for_warp(socks_port) or "Unknown"
@@ -250,7 +217,6 @@ jobs:
                                   if ip_attempt < max_ip_attempts:
                                       print(f"[{run_id}] Rotating Cloudflare WARP container and retrying...", flush=True)
                                       renew_warp_ip(worker_index, socks_port)
-                                      time.sleep(2)
                                       continue
                                   else:
                                       print(f"[{run_id}] Max IP rotation attempts reached for this job.", flush=True)
