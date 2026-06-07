@@ -44,17 +44,17 @@ jobs:
           docker pull caomingjun/warp
           docker save -o ~/warp-image.tar caomingjun/warp
 
-      - name: Start 20 Parallel WARP Containers
+      - name: Start 40 Parallel WARP Containers
         run: |
-          # اجرای سریع ۲۰ کانتینر داکر وارپ از روی ایمیج کش شده
-          for i in {1..20}; do
+          # اجرای سریع ۴۰ کانتینر داکر وارپ (بالاترین ظرفیت امن پردازنده ۲ هسته‌ای گیت‌هاب)
+          for i in {1..40}; do
             PORT=$((4000 + i))
             docker run -d --name warp$i --cap-add=NET_ADMIN -p $PORT:1080 caomingjun/warp
             echo "Started WARP Instance $i on Port $PORT"
           done
           
-          # زمان کافی برای ثبات اتصالات و ثبت‌نام اولیه هر ۲۰ داکر به طور همزمان
-          sleep 20
+          # دادن زمان کافی به پردازنده برای ایجاد ۴۰ تونل و ۴۰ ثبت‌نام همزمان در کلودفلر
+          sleep 35
           
           # تست پورت‌های اول و دوم جهت تایید نهایی تغییر آی‌پی‌ها
           curl --socks5-hostname 127.0.0.1:4001 https://ifconfig.me || true
@@ -80,13 +80,13 @@ jobs:
               print("Error: SPACE_URL env var is not set.", flush=True)
               sys.exit(1)
 
-          print(f"Starting long-running multi-worker with 20 WARPs for Space: {SPACE_URL}", flush=True)
+          print(f"Starting long-running multi-worker with 40 WARPs for Space: {SPACE_URL}", flush=True)
 
           start_time = time.time()
           max_run_duration = 5 * 60 * 60  # 5 hours
           github_run_id = os.environ.get("GITHUB_RUN_ID", "local-worker")
 
-          # ساخت حافظه موقت بلک‌لیست آی‌پی‌های مسدود شده به صورت سراسری و ایمن بین تمام نخ‌ها
+          # ساخت حافظه موقت بلک‌لیست آی‌پی‌های مسدود شده به صورت سراسری و ایمن بین تمام ۴۰ نخ
           blacklisted_ips = set()
           blacklist_lock = threading.Lock()
 
@@ -259,9 +259,9 @@ jobs:
                       
                   time.sleep(2)
 
-          # راه‌اندازی ۲۰ نخ کارگر موازی به همراه اختصاص پورت‌های داکر مجزا
+          # راه‌اندازی ۴۰ نخ کارگر موازی به همراه اختصاص پورت‌های داکر مجزا
           threads = []
-          for idx in range(1, 21):
+          for idx in range(1, 41):
               port = 4000 + idx
               t = threading.Thread(target=run_worker_thread, args=(idx, port), daemon=True)
               t.start()
