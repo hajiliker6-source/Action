@@ -115,19 +115,19 @@ jobs:
               return None
 
           def renew_warp_ip(worker_index, socks_port):
-              """بازسازی کامل کانتینر داکر و شکستن چسبندگی آی‌پی با سوییچ انی‌کست"""
+              """حذف کانتینر قبلی و اجرای مجدد آن برای دریافت آی‌پی کاملاً تازه از کلودفلر"""
               try:
                   container_name = f"warp{worker_index}"
                   
-                  # ۱. حذف کامل کانتینر خراب/قدیمی
+                  # ۱. حذف کامل کانتینر قدیمی برای جلوگیری از خطای Host unreachable
                   subprocess.run(f"docker rm -f {container_name}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  time.sleep(1.5) # زمان کافی برای قطع اتصال فیزیکی آژور
+                  time.sleep(1.5) # زمان خواب کوتاه جهت قطع موقت اتصال فیزیکی آژور
                   
                   # ۲. ساخت کانتینر کاملاً تمیز و تازه نفس
                   subprocess.run(f"docker run -d --name {container_name} --cap-add=NET_ADMIN -p {socks_port}:1080 caomingjun/warp", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  time.sleep(3) # زمان کوتاه برای لود شدن سرویس وارپ داخل کانتینر
+                  time.sleep(2.5) # انتظار کوتاه برای لود شدن دیمن داخلی داکر
                   
-                  # ۳. سوییچ کردن انی‌کست مقصد برای تغییر قطعی رنج آی‌پی
+                  # ۳. شکستن چسبندگی پورت UDP با چرخاندن آدرس‌های انی‌کست کلودفلر قبل از دست‌دهی نهایی
                   endpoints = [
                       "162.159.192.1:2408",
                       "162.159.193.1:2408",
@@ -141,13 +141,12 @@ jobs:
                   # ۴. اتصال مجدد
                   subprocess.run(f"docker exec {container_name} warp-cli --accept-tos connect", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   
-                  # ۵. انتظار برای دریافت آی‌پی جدید
                   current_ip = check_and_wait_for_warp(socks_port)
                   if current_ip:
-                      print(f"🔄 [Worker {worker_index}] Fresh WARP IP established: {current_ip} (Endpoint: {selected_endpoint})", flush=True)
+                      print(f"🔄 [Worker {worker_index}] Cloudflare WARP IP rotated successfully. New IP: {current_ip} (Endpoint: {selected_endpoint})", flush=True)
                       return current_ip
               except Exception as e:
-                  print(f"⚠️ [Worker {worker_index}] Error in secure renew: {e}", flush=True)
+                  print(f"⚠️ [Worker {worker_index}] Error renewing WARP IP: {e}", flush=True)
               return None
 
           def run_worker_thread(worker_index, socks_port):
@@ -216,8 +215,8 @@ jobs:
                                   ip_attempt += 1
                                   current_ip = check_and_wait_for_warp(socks_port) or "Unknown"
                                   
-                                  # تایید تغییر واقعی آدرس آی‌پی برای بهینه‌سازی پردازش
-                                  if last_ip and current_ip == last_ip and ip_attempt > 1:
+                                  # تایید تغییر واقعی آدرس آی‌پی برای بهینه‌سازی پردازش (ممانعت از لوپ تکراری Unknown)
+                                  if last_ip and current_ip == last_ip and current_ip != "Unknown" and ip_attempt > 1:
                                       print(f"[{run_id}] IP did not change ({current_ip}). Re-requesting WARP container reset...", flush=True)
                                       renew_warp_ip(worker_index, socks_port)
                                       current_ip = check_and_wait_for_warp(socks_port) or "Unknown"
