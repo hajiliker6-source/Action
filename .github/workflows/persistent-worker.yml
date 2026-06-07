@@ -53,8 +53,8 @@ jobs:
             echo "Started WARP Instance $i on Port $PORT"
           done
           
-          # زمان کوتاه برای ثبات اتصالات
-          sleep 12
+          # زمان تاخیر ۲۵ ثانیه‌ای جهت اتصال همزمان و کامل ۲۰ کانتینر بدون اختلال
+          sleep 25
           
           # تست پورت‌های اول و دوم جهت تایید نهایی تغییر آی‌پی‌ها
           curl --socks5-hostname 127.0.0.1:4001 https://ifconfig.me || true
@@ -136,14 +136,18 @@ jobs:
           def run_worker_thread(worker_index, socks_port):
               print(f"[{worker_index}] Worker thread started using SOCKS {socks_port}", flush=True)
               thread_worker_id = f"{github_run_id}_w{worker_index}"
+              last_heartbeat_time = 0
               
               while time.time() - start_time < max_run_duration:
                   try:
-                      # ارسال ضربان قلب مجهز به شناسه منحصربه‌فرد این نخ کارگر موازی
-                      try:
-                          requests.post(f"{SPACE_URL}/api/worker/heartbeat", json={"worker_id": thread_worker_id}, timeout=10)
-                      except Exception as e:
-                          pass
+                      # ارسال کنترل‌شده ضربان قلب فقط هر ۱۵ ثانیه یک‌بار جهت جلوگیری کامل از قفل شدن دیتابیس
+                      now_time = time.time()
+                      if now_time - last_heartbeat_time > 15:
+                          try:
+                              requests.post(f"{SPACE_URL}/api/worker/heartbeat", json={"worker_id": thread_worker_id}, timeout=10)
+                              last_heartbeat_time = now_time
+                          except Exception as e:
+                              pass
 
                       # ۱. بررسی زنده بودن و عدم بلک‌لیست بودن آی‌پی فعلی قبل از هرگونه دریافت تسک جدید
                       current_ip = check_and_wait_for_warp(socks_port)
