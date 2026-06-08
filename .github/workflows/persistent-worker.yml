@@ -36,11 +36,14 @@ jobs:
 
       - name: Start 40 Parallel Go Warp-Plus Proxies
         run: |
-          # ۱. اجرای فوری و مستقل ۴۰ پروسه بومی وارپ‌پلاس به صورت فوق‌العاده سبک و سریع در پوشه‌های مجزا
+          # ۱. ثبت‌نام خودکار قوانین و شرایط برای ۴۰ کارگر به صورت مجزا و سپس اجرای پروسه بومی در پس‌زمینه
           for i in {1..40}; do
             PORT=$((4000 + i))
             mkdir -p "warp_dir_$i"
             cd "warp_dir_$i"
+            # پذیرش خودکار قوانین و ثبت‌نام برای ایجاد config.json در این دایرکتوری
+            echo "y" | ../warp-plus register
+            # اجرای پروسه پروکسی بومی وارپ پلاس
             ../warp-plus -b "127.0.0.1:$PORT" > "warp.log" 2>&1 &
             cd ..
             echo "Started Warp-Plus Go Instance $i on Port $PORT"
@@ -130,8 +133,9 @@ jobs:
                   subprocess.run(f"rm -rf warp_dir_{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   time.sleep(0.1)
                   
-                  # ۳. ساخت پوشه مجدد و اجرای مجدد پروسه بومی
+                  # ۳. ساخت پوشه مجدد، پذیرش خودکار قوانین و اجرای مجدد پروسه بومی
                   subprocess.run(f"mkdir -p warp_dir_{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  subprocess.run(f"cd warp_dir_{worker_index} && echo y | ../warp-plus register", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   subprocess.run(f"cd warp_dir_{worker_index} && ../warp-plus -b 127.0.0.1:{socks_port} > warp.log 2>&1 &", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   
                   current_ip = check_and_wait_for_warp(socks_port)
