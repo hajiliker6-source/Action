@@ -23,7 +23,7 @@ jobs:
 
       - name: Build VPN Gate Docker Image
         run: |
-          # ساخت یک ایمیج فوق سبک برای اجرای OpenVPN و تبدیل آن به SOCKS5 داخلی
+          # ساخت ایمیج سبک OpenVPN + Socks5
           mkdir -p vpn_docker
           cat << 'EOF' > vpn_docker/Dockerfile
           FROM alpine:latest
@@ -36,46 +36,46 @@ jobs:
 
           cat << 'EOF' > vpn_docker/entrypoint.sh
           #!/bin/bash
-          # ورود خودکار مشخصات vpn gate
           echo -e "vpn\nvpn" > /pass.txt
           sed -i 's/^auth-user-pass.*/auth-user-pass \/pass.txt/' /vpn.ovpn
           
           # اجرای پراکسی در پس‌زمینه
           microsocks -p 1080 &
           
-          # اجرای VPN ژاپن (اگر این گره خاموش باشد، کانتینر خودکار بسته می‌شود و پایتون سریع متوجه می‌شود)
-          exec openvpn --config /vpn.ovpn --pull-filter ignore "ifconfig-ipv6" --pull-filter ignore "route-ipv6" --auth-retry nointeract
+          # اجرای VPN با محدودیت زمانِ تلاش برای جلوگیری از قفل شدن
+          exec openvpn --config /vpn.ovpn --connect-retry-max 1 --pull-filter ignore "ifconfig-ipv6" --pull-filter ignore "route-ipv6" --auth-retry nointeract
           EOF
 
           docker build -t vpngate-node vpn_docker/
 
-      - name: Fetch VPN Gate (Japan) & Start 20 Nodes
+      - name: Fetch VPN Gate (Japan) & Start 20 TCP Nodes
         run: |
           echo "📥 Downloading VPN Gate database (University of Tsukuba, Japan)..."
-          # دریافت لیست سرورهای داوطلبانه از دانشگاه تسوکوبا
           curl -s https://www.vpngate.net/api/iphone/ | grep -E "^[^#*]" > vpngate.csv
           
-          # مرتب‌سازی بر اساس بالاترین امتیاز پایداری (Score)
+          # مرتب‌سازی بر اساس امتیاز
           sort -t, -k3 -nr vpngate.csv > sorted_vpn.csv
           
           i=1
           while IFS=, read -r HostName IP Score Ping Speed CountryLong CountryShort NumVpnSessions Uptime Users TotalTraffic LogType Operator Message OpenVPN_ConfigData_Base64; do
             if [ -n "$OpenVPN_ConfigData_Base64" ] && [ "$OpenVPN_ConfigData_Base64" != "\r" ]; then
               B64=$(echo "$OpenVPN_ConfigData_Base64" | tr -d '\r')
-              echo "$B64" | base64 -d > "vpn_dir_$i.ovpn" 2>/dev/null
+              echo "$B64" | base64 -d > "temp.ovpn" 2>/dev/null
               
-              if [ -s "vpn_dir_$i.ovpn" ]; then
+              # 💎 راز موفقیت: فایروال گیت‌هاب UDP را مسدود می‌کند. ما فقط گره‌هایی که با TCP کار می‌کنند را جدا و استفاده می‌کنیم!
+              if grep -iq "proto tcp" "temp.ovpn"; then
+                mv temp.ovpn "vpn_dir_$i.ovpn"
                 PORT=$((4000 + i))
                 docker run -d --name vpn$i --cap-add=NET_ADMIN --device=/dev/net/tun -v $(pwd)/vpn_dir_$i.ovpn:/vpn.ovpn -p $PORT:1080 vpngate-node > /dev/null 2>&1
-                echo "✅ Started VPN Gate Node $i on Port $PORT (Country: $CountryLong, Score: $Score)"
+                echo "✅ Started VPN Gate Node $i on Port $PORT (Protocol: TCP, Country: $CountryLong, Score: $Score)"
                 i=$((i+1))
                 if [ "$i" -gt 20 ]; then break; fi
               fi
             fi
           done < sorted_vpn.csv
           
-          echo "⏳ Waiting 12 seconds for OpenVPN Handshakes..."
-          sleep 12
+          echo "⏳ Waiting 20 seconds for TCP OpenVPN Handshakes to bypass Azure Firewall..."
+          sleep 20
 
       - name: Run Persistent Ghost Worker
         env:
@@ -145,30 +145,28 @@ jobs:
                               available_ports = list(range(4001, 4021))
                               random.shuffle(available_ports)
                               
-                              # سیستم اسنایپر: تست پیش‌هنگام گره‌های خانگی
                               for attempt in range(1, len(available_ports) + 1):
                                   if not available_ports:
                                       break
                                   port = available_ports.pop()
                                   proxy = f"127.0.0.1:{port}"
                                       
-                                  print(f"[{run_id}] Internal Attempt {attempt} | Testing VPN Node on port {port}...", flush=True)
+                                  print(f"[{run_id}] Internal Attempt {attempt} | Testing TCP VPN Node on port {port}...", flush=True)
                                   send_live_log(run_id, f"🔍 تست اتصال به گره VPN خانگی (پورت {port})...")
                                   
-                                  # تست 5 ثانیه‌ای برای بررسی زنده بودن سیستم میزبان داوطلب
+                                  # افزایش زمان تست به 8 ثانیه برای تطابق با پینگِ کامپیوترهای خانگی آسیای شرقی
                                   try:
-                                      test_r = requests.get("https://huggingface.co/", proxies={"http": f"socks5h://{proxy}", "https": f"socks5h://{proxy}"}, timeout=5)
+                                      test_r = requests.get("https://huggingface.co/", proxies={"http": f"socks5h://{proxy}", "https": f"socks5h://{proxy}"}, timeout=8)
                                       if test_r.status_code in [200, 401, 403, 404, 405]:
                                           print(f"[{run_id}] VPN Node on {port} is ALIVE! Spawning Gradio...", flush=True)
-                                          send_live_log(run_id, f"✅ گره متصل است! اجرای مدل هوش مصنوعی (بدون تحریم آی‌پی)...")
+                                          send_live_log(run_id, f"✅ گره متصل است! اجرای مدل هوش مصنوعی...")
                                       else:
-                                          send_live_log(run_id, f"⚠️ گره پاسخ نداد. پرش در ۱ ثانیه...")
+                                          send_live_log(run_id, f"⚠️ گره پاسخ نامعتبر داد. پرش سریع به گره بعدی...")
                                           continue
-                                  except Exception:
-                                      send_live_log(run_id, f"⚠️ گره قطع بود. پرش سریع به گره بعدی...")
+                                  except Exception as e:
+                                      send_live_log(run_id, f"⚠️ گره هنوز آماده نیست. پرش سریع به گره بعدی...")
                                       continue 
                                   
-                                  # اجرای اسکریپت رندر مدل با اتصال از طریق گره سالم
                                   job_env = os.environ.copy()
                                   job_env["HTTP_PROXY"] = f"socks5h://{proxy}"
                                   job_env["HTTPS_PROXY"] = f"socks5h://{proxy}"
@@ -196,7 +194,6 @@ jobs:
                                       try: p.kill()
                                       except: pass
                                       
-                                  # 90 ثانیه فرصت رندر به مدل می‌دهیم
                                   timer = threading.Timer(90, kill_proc, [process])
                                   try:
                                       timer.start()
@@ -220,7 +217,7 @@ jobs:
 
                               if not success:
                                   print(f"[{run_id}] All VPN nodes failed. Retrying in queue...", flush=True)
-                                  send_live_log(run_id, "❌ تمام گره‌های تست شده قطع بودند. بازگرداندن به صف برای تلاش مجدد سیستم...")
+                                  send_live_log(run_id, "❌ تمام ۲۰ گرهِ این بلوک قطع بودند. بازگرداندن به صف برای تلاش مجدد...")
                                   try:
                                       requests.post(f"{SPACE_URL}/api/webhook/fail", json={"run_id": run_id, "error": "All 20 VPN nodes failed.", "github_run_id": github_run_id}, timeout=15)
                                   except: pass
@@ -230,7 +227,6 @@ jobs:
                   time.sleep(2)
 
           threads = []
-          # اجرای 20 کارگر موازی
           for idx in range(1, 21):
               t = threading.Thread(target=run_worker_thread, args=(idx,), daemon=True)
               t.start()
