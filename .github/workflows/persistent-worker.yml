@@ -27,49 +27,44 @@ jobs:
         run: |
           pip install -r temp_requirements.txt
 
-      - name: Download and Prepare Go Warp-Plus
-        run: |
-          # دانلود سریع باینری سبک ۷ مگابایتی وارپ پلاس
-          wget https://github.com/bepass-org/warp-plus/releases/download/v1.2.6/warp-plus_linux-amd64.zip
-          unzip warp-plus_linux-amd64.zip
-          chmod +x warp-plus
+      - name: Cache WARP Docker Image
+        id: cache-warp
+        uses: actions/cache@v4
+        with:
+          path: /tmp/warp-image.tar
+          key: ${{ runner.os }}-warp-docker-fast-v1
 
-      - name: Start 40 Parallel Go Warp-Plus Proxies
+      - name: Load WARP Docker Image from Cache
+        if: steps.cache-warp.outputs.cache-hit == 'true'
+        run: docker load -i /tmp/warp-image.tar
+
+      - name: Pull and Save WARP Docker Image
+        if: steps.cache-warp.outputs.cache-hit != 'true'
         run: |
-          # ۱. ایزوله‌سازی کامل هویت (Identity) هر کارگر برای جلوگیری از تداخل کلیدها
+          docker pull caomingjun/warp
+          docker save -o /tmp/warp-image.tar caomingjun/warp
+
+      - name: Start 40 Parallel WARP Containers Fast
+        run: |
+          # ۱. اجرای همزمان و فوق سریع ۴۰ کانتینر ایزوله داکر بدون اتلاف وقت
           for i in {1..40}; do
             PORT=$((4000 + i))
-            # ایجاد پوشه اختصاصی هویتی برای هر پروسه
-            mkdir -p "warp_dir_$i/home"
-            cd "warp_dir_$i"
-            
-            # ثبت‌نام با اعمال env HOME ایزوله برای ساخت ۴۰ هویت مجزا و یکتا
-            echo "y" | env HOME="$PWD/home" ../warp-plus -4 -e 162.159.192.1:2408 register
-            # اجرای پروسه با اعمال هویت ایزوله
-            env HOME="$PWD/home" ../warp-plus -b "127.0.0.1:$PORT" -4 -e 162.159.192.1:2408 > "warp.log" 2>&1 &
-            
-            cd ..
-            echo "Started Warp-Plus Go Instance $i on Port $PORT"
-            sleep 0.1 # جلوگیری از مسدود شدن به دلیل Anti-DDoS کلودفلر
+            docker run -d --name warp$i --cap-add=NET_ADMIN -p $PORT:1080 caomingjun/warp > /dev/null 2>&1
+            echo "Started WARP Docker Instance $i on Port $PORT"
           done
           
-          # ۲. بررسی موازی باز شدن پورت‌ها به صورت پس‌زمینه بدون اتلاف وقت (حداکثر ۱ الی ۲ ثانیه)
-          echo "در حال بررسی موازی وضعیت اتصال کلاینت‌های وارپ..."
+          # ۲. مانیتورینگ موازی: به محض باز شدن پورت، کارگر آزاد می‌شود (حذف کامل sleep 35)
+          echo "در حال بررسی وضعیت اتصال پورت‌های SOCKS5..."
           for i in {1..40}; do
             PORT=$((4000 + i))
             (
               while ! (echo > /dev/tcp/127.0.0.1/$PORT) >/dev/null 2>&1; do
                 sleep 0.2
               done
-              echo "SOCKS5 Port $PORT is ready!"
             ) &
           done
-          wait # انتظار برای فعال شدن تمام پورت‌ها به صورت همزمان
-          echo "هر ۴۰ کلاینت وارپ پلاس با موفقیت آماده به کار شدند!"
-          
-          # تست پورت‌های اول و دوم جهت تایید نهایی تغییر آی‌پی‌ها
-          curl --socks5-hostname 127.0.0.1:4001 https://ifconfig.me || true
-          curl --socks5-hostname 127.0.0.1:4002 https://ifconfig.me || true
+          wait
+          echo "هر ۴۰ پروکسی به صورت کامل لود شدند!"
 
       - name: Run Persistent Worker
         env:
@@ -102,7 +97,7 @@ jobs:
           blacklist_lock = threading.Lock()
 
           def check_and_wait_for_warp(socks_port):
-              """صبر کردن برای فعال شدن کامل پروکسی وارپ و اطمینان از تغییر واقعی IP به کلودفلر"""
+              """استفاده از سیستم هوشمند پایتون برای تست واقعی تونل کلودفلر"""
               for _ in range(15):
                   try:
                       proxies = {
@@ -118,7 +113,7 @@ jobs:
                                   parts = line.strip().split("=", 1)
                                   if len(parts) == 2:
                                       data[parts[0]] = parts[1]
-                          # حتماً باید سیستم تونل کلودفلر فعال باشد تا آی‌پی سرور اصلی گیت‌هاب نشت نکند
+                          # تأیید برقراری امن تونل
                           if data.get("warp") in ["on", "plus"] and data.get("ip"):
                               return data.get("ip")
                   except:
@@ -127,20 +122,11 @@ jobs:
               return None
 
           def renew_warp_ip(worker_index, socks_port):
-              """بستن سریع پروسه بومی وارپ پلاس و دریافت هویت کاملاً مجزا و جدید در پوشه ایزوله"""
+              """دریافت آی‌پی جدید با ری‌استارت سریع کانتینر داکر"""
               try:
-                  # ۱. بستن پروسه قبلی با پورت مربوطه
-                  subprocess.run(f"fuser -k {socks_port}/tcp || kill -9 $(lsof -t -i:{socks_port})", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  subprocess.run(f"docker exec warp{worker_index} rm -f /var/lib/cloudflare-warp/reg.json", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   time.sleep(0.2)
-                  
-                  # ۲. پاک کردن پوشه ایزوله کارگر برای دریافت هویت کاملاً جدید
-                  subprocess.run(f"rm -rf warp_dir_{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  time.sleep(0.1)
-                  
-                  # ۳. ساخت پوشه مجدد با مسیر ایزوله، پذیرش خودکار و اجرای مجدد
-                  subprocess.run(f"mkdir -p warp_dir_{worker_index}/home", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  subprocess.run(f"cd warp_dir_{worker_index} && echo y | env HOME=\"$PWD/home\" ../warp-plus -4 -e 162.159.192.1:2408 register", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  subprocess.run(f"cd warp_dir_{worker_index} && env HOME=\"$PWD/home\" ../warp-plus -b 127.0.0.1:{socks_port} -4 -e 162.159.192.1:2408 > warp.log 2>&1 &", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  subprocess.run(f"docker restart warp{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   
                   current_ip = check_and_wait_for_warp(socks_port)
                   if current_ip:
@@ -156,13 +142,11 @@ jobs:
               
               while time.time() - start_time < max_run_duration:
                   try:
-                      # ارسال ضربان قلب مجهز به شناسه منحصربه‌فرد این نخ کارگر موازی
                       try:
                           requests.post(f"{SPACE_URL}/api/worker/heartbeat", json={"worker_id": thread_worker_id}, timeout=10)
                       except Exception as e:
                           pass
 
-                      # ۱. بررسی زنده بودن و عدم بلک‌لیست بودن آی‌پی فعلی قبل از هرگونه دریافت تسک جدید
                       current_ip = check_and_wait_for_warp(socks_port)
                       
                       with blacklist_lock:
@@ -177,7 +161,6 @@ jobs:
                           time.sleep(2)
                           continue
 
-                      # ۲. اگر آی‌پی کاملاً سالم و آماده بود، اقدام به نظرسنجی مجهز به شناسه برای ثبت توزیع چرخشی می‌کنیم
                       r = requests.post(f"{SPACE_URL}/api/worker/poll", json={"worker_id": thread_worker_id}, timeout=15)
                       if r.status_code == 200:
                           data = r.json()
@@ -191,12 +174,10 @@ jobs:
 
                               print(f"[{run_id}] Thread {worker_index} grabbed job ({event_type}) using clean IP: {current_ip}", flush=True)
                               
-                              # تنظیمات محیطی استاندارد کارگر
                               job_env = os.environ.copy()
                               job_env["HTTP_PROXY"] = f"socks5h://127.0.0.1:{socks_port}"
                               job_env["HTTPS_PROXY"] = f"socks5h://127.0.0.1:{socks_port}"
                               
-                              # Map client_payload to environment variables
                               for key, val in client_payload.items():
                                   if key != "data":
                                       job_env[key.upper()] = str(val)
@@ -209,13 +190,11 @@ jobs:
                                       else:
                                           job_env[key.upper()] = str(val)
                           
-                              # Extract the script
                               script_content = payload_data.get("script") or client_payload.get("script")
                               if not script_content:
                                   print(f"Error: No script found in payload for job {run_id}", flush=True)
                                   continue
                                   
-                              # ایجاد فایل اسکریپت منحصربه‌فرد برای این کارگر جهت عدم تداخل با بقیه نخ‌ها
                               script_file = f"run_job_{run_id}_w{worker_index}.py"
                               with open(script_file, "w", encoding="utf-8") as f:
                                   f.write(script_content)
@@ -245,15 +224,12 @@ jobs:
                               if process.returncode == 0:
                                   print(f"Job {run_id} finished successfully.", flush=True)
                               else:
-                                  # بروز خطا (احتمالاً محدودیت سهمیه آی‌پی)
                                   print(f"[{run_id}] ⚠️ Job failed (Exit Code {process.returncode}). Blacklisting IP {current_ip} and releasing job back to queue...", flush=True)
                                   
-                                  # افزودن آی‌پی جاری به بلک‌لیست سراسری برای ممانعت از استفاده توسط بقیه نخ‌ها
                                   if current_ip:
                                       with blacklist_lock:
                                           blacklisted_ips.add(current_ip)
                                   
-                                  # آزادسازی فوری تسک جهت دریافت توسط نخ‌های آماده و تمیز دیگر
                                   try:
                                       requests.post(
                                           f"{SPACE_URL}/api/webhook/fail",
@@ -267,7 +243,6 @@ jobs:
                                   except Exception as ex:
                                       print(f"Error releasing job back to server: {ex}", flush=True)
                                       
-                                  # چرخاندن آی‌پی این نخ در پس‌زمینه به صورت غیرهمزمان تا دوباره تمیز و گرم شود
                                   renew_warp_ip(worker_index, socks_port)
                                   
                               continue
@@ -276,7 +251,6 @@ jobs:
                       
                   time.sleep(2)
 
-          # راه‌اندازی ۴۰ نخ کارگر موازی به همراه اختصاص پورت‌های مجزا
           threads = []
           for idx in range(1, 41):
               port = 4000 + idx
@@ -284,7 +258,6 @@ jobs:
               t.start()
               threads.append(t)
 
-          # نگه داشتن نخ اصلی تا زمانی که زمان اجرا به پایان برسد
           while time.time() - start_time < max_run_duration:
               time.sleep(10)
 
