@@ -27,12 +27,12 @@ jobs:
         run: |
           pip install -r temp_requirements.txt
 
-      - name: Cache WARP Docker Image
+      - name: Restore WARP Docker Image Cache
         id: cache-warp
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: /tmp/warp-image.tar
-          key: ${{ runner.os }}-warp-docker-fast-v1
+          key: ${{ runner.os }}-warp-docker-v2
 
       - name: Load WARP Docker Image from Cache
         if: steps.cache-warp.outputs.cache-hit == 'true'
@@ -44,6 +44,13 @@ jobs:
           docker pull caomingjun/warp
           docker save -o /tmp/warp-image.tar caomingjun/warp
 
+      - name: Explicitly Save WARP Docker Image Cache
+        if: steps.cache-warp.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/warp-image.tar
+          key: ${{ runner.os }}-warp-docker-v2
+
       - name: Start 40 Parallel WARP Containers Fast
         run: |
           # ۱. اجرای همزمان و فوق سریع ۴۰ کانتینر ایزوله داکر بدون اتلاف وقت
@@ -53,7 +60,7 @@ jobs:
             echo "Started WARP Docker Instance $i on Port $PORT"
           done
           
-          # ۲. مانیتورینگ موازی: به محض باز شدن پورت، کارگر آزاد می‌شود (حذف کامل sleep 35)
+          # ۲. مانیتورینگ موازی: به محض باز شدن پورت، کارگر آزاد می‌شود
           echo "در حال بررسی وضعیت اتصال پورت‌های SOCKS5..."
           for i in {1..40}; do
             PORT=$((4000 + i))
