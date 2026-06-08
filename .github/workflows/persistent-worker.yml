@@ -46,15 +46,26 @@ jobs:
 
       - name: Start 40 Parallel WARP Containers
         run: |
-          # اجرای سریع ۴۰ کانتینر داکر وارپ (بالاترین ظرفیت امن پردازنده ۲ هسته‌ای گیت‌هاب)
+          # ۱. اجرای فوری کانتینرهای داکر وارپ
           for i in {1..40}; do
             PORT=$((4000 + i))
             docker run -d --name warp$i --cap-add=NET_ADMIN -p $PORT:1080 caomingjun/warp
             echo "Started WARP Instance $i on Port $PORT"
           done
           
-          # دادن زمان کافی به پردازنده برای ایجاد ۴۰ تونل و ۴۰ ثبت‌نام همزمان در کلودفلر
-          sleep 35
+          # ۲. مانیتورینگ و انتظار موازی برای باز شدن پورت‌ها (حذف کامل مکث ۳۵ ثانیه‌ای ثابت)
+          echo "در حال بررسی موازی وضعیت اتصال کلاینت‌های وارپ..."
+          for i in {1..40}; do
+            PORT=$((4000 + i))
+            (
+              while ! (echo > /dev/tcp/127.0.0.1/$PORT) >/dev/null 2>&1; do
+                sleep 0.5
+              done
+              echo "SOCKS5 Port $PORT is ready!"
+            ) &
+          done
+          wait # انتظار برای اتصال همزمان تمام پورت‌ها
+          echo "هر ۴۰ کلاینت با موفقیت آماده به کار شدند!"
           
           # تست پورت‌های اول و دوم جهت تایید نهایی تغییر آی‌پی‌ها
           curl --socks5-hostname 127.0.0.1:4001 https://ifconfig.me || true
