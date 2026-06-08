@@ -27,45 +27,38 @@ jobs:
         run: |
           pip install -r temp_requirements.txt
 
-      - name: Cache WARP Docker Image
-        id: cache-warp
-        uses: actions/cache@v4
-        with:
-          path: ${{ github.workspace }}/warp-image.tar
-          key: ${{ runner.os }}-warp-image-v1
-
-      - name: Load WARP Docker Image from Cache
-        if: steps.cache-warp.outputs.cache-hit == 'true'
-        run: docker load -i ${{ github.workspace }}/warp-image.tar
-
-      - name: Pull and Save WARP Docker Image
-        if: steps.cache-warp.outputs.cache-hit != 'true'
+      - name: Download and Prepare Go Warp-Plus
         run: |
-          docker pull caomingjun/warp
-          docker save -o ${{ github.workspace }}/warp-image.tar caomingjun/warp
+          # دانلود فوق‌العاده سریع باینری سبک ۷ مگابایتی وارپ پلاس به جای ایمیج داکر
+          wget https://github.com/bepass-org/warp-plus/releases/download/v1.2.6/warp-plus_linux-amd64.zip
+          unzip warp-plus_linux-amd64.zip
+          chmod +x warp-plus
 
-      - name: Start 40 Parallel WARP Containers
+      - name: Start 40 Parallel Go Warp-Plus Proxies
         run: |
-          # ۱. اجرای همزمان تمام ۴۰ کانتینر در پس‌زمینه (کاهش زمان از ۱۱ ثانیه به کمتر از ۲ ثانیه)
+          # ۱. اجرای فوری و مستقل ۴۰ پروسه بومی وارپ‌پلاس به صورت فوق‌العاده سبک و سریع در پوشه‌های مجزا
           for i in {1..40}; do
             PORT=$((4000 + i))
-            docker run -d --name warp$i --cap-add=NET_ADMIN -p $PORT:1080 caomingjun/warp &
+            mkdir -p "warp_dir_$i"
+            cd "warp_dir_$i"
+            ../warp-plus -b "127.0.0.1:$PORT" > "warp.log" 2>&1 &
+            cd ..
+            echo "Started Warp-Plus Go Instance $i on Port $PORT"
           done
-          wait # منتظر می‌ماند تا دستور ساخت هر ۴۰ کانتینر صادر شود
           
-          # ۲. مانیتورینگ و انتظار موازی برای باز شدن پورت‌ها به صورت همزمان
+          # ۲. بررسی موازی باز شدن پورت‌ها به صورت پس‌زمینه بدون اتلاف وقت (حداکثر ۱ الی ۲ ثانیه)
           echo "در حال بررسی موازی وضعیت اتصال کلاینت‌های وارپ..."
           for i in {1..40}; do
             PORT=$((4000 + i))
             (
               while ! (echo > /dev/tcp/127.0.0.1/$PORT) >/dev/null 2>&1; do
-                sleep 0.5
+                sleep 0.2
               done
               echo "SOCKS5 Port $PORT is ready!"
             ) &
           done
-          wait # انتظار برای اتصال همزمان تمام پورت‌ها
-          echo "هر ۴۰ کلاینت با موفقیت آماده به کار شدند!"
+          wait # انتظار برای فعال شدن تمام پورت‌ها به صورت همزمان
+          echo "هر ۴۰ کلاینت وارپ پلاس با موفقیت آماده به کار شدند!"
           
           # تست پورت‌های اول و دوم جهت تایید نهایی تغییر آی‌پی‌ها
           curl --socks5-hostname 127.0.0.1:4001 https://ifconfig.me || true
@@ -127,14 +120,19 @@ jobs:
               return None
 
           def renew_warp_ip(worker_index, socks_port):
-              """حذف فایل ثبت‌نام قبلی و ری‌استارت فوق‌العاده سریع کانتینر جهت دریافت آی‌پی کاملاً تازه بدون سربار سنگین داکر"""
+              """بستن فوق‌العاده سریع پروسه بومی وارپ پلاس و پاک کردن دایرکتوری آن برای چرخاندن آی‌پی"""
               try:
-                  # ۱. پاک کردن فایل ثبت‌نام فیزیکی درون کانتینر تا اسکریپت ورودی داکر مجبور به دریافت هویت جدید شود
-                  subprocess.run(f"docker exec warp{worker_index} rm -f /var/lib/cloudflare-warp/reg.json", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  # ۱. بستن پروسه قبلی با پورت مربوطه
+                  subprocess.run(f"fuser -k {socks_port}/tcp || kill -9 $(lsof -t -i:{socks_port})", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   time.sleep(0.2)
                   
-                  # ۲. ری‌استارت بسیار سریع و بدون سربار کانتینر موجود
-                  subprocess.run(f"docker restart warp{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  # ۲. پاک کردن پوشه ایزوله کارگر
+                  subprocess.run(f"rm -rf warp_dir_{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  time.sleep(0.1)
+                  
+                  # ۳. ساخت پوشه مجدد و اجرای مجدد پروسه بومی
+                  subprocess.run(f"mkdir -p warp_dir_{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  subprocess.run(f"cd warp_dir_{worker_index} && ../warp-plus -b 127.0.0.1:{socks_port} > warp.log 2>&1 &", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   
                   current_ip = check_and_wait_for_warp(socks_port)
                   if current_ip:
