@@ -29,24 +29,28 @@ jobs:
 
       - name: Download and Prepare Go Warp-Plus
         run: |
-          # دانلود فوق‌العاده سریع باینری سبک ۷ مگابایتی وارپ پلاس به جای ایمیج داکر
+          # دانلود سریع باینری سبک ۷ مگابایتی وارپ پلاس
           wget https://github.com/bepass-org/warp-plus/releases/download/v1.2.6/warp-plus_linux-amd64.zip
           unzip warp-plus_linux-amd64.zip
           chmod +x warp-plus
 
       - name: Start 40 Parallel Go Warp-Plus Proxies
         run: |
-          # ۱. ثبت‌نام خودکار قوانین و شرایط برای ۴۰ کارگر به صورت مجزا و سپس اجرای پروسه بومی در پس‌زمینه با آی‌پی ثابت 
+          # ۱. ایزوله‌سازی کامل هویت (Identity) هر کارگر برای جلوگیری از تداخل کلیدها
           for i in {1..40}; do
             PORT=$((4000 + i))
-            mkdir -p "warp_dir_$i"
+            # ایجاد پوشه اختصاصی هویتی برای هر پروسه
+            mkdir -p "warp_dir_$i/home"
             cd "warp_dir_$i"
-            # پذیرش خودکار قوانین و ثبت‌نام برای ایجاد config.json با فورس کردن IPv4 و آی‌پی ثابت روی پورت رسمی 2408
-            echo "y" | ../warp-plus -4 -e 162.159.192.1:2408 register
-            # اجرای پروسه پروکسی بومی وارپ پلاس با لود اجباری فقط IPv4 و اندپوینت ثابت آی‌پی جهت عبور از فایروال گیت‌هاب
-            ../warp-plus -b "127.0.0.1:$PORT" -4 -e 162.159.192.1:2408 > "warp.log" 2>&1 &
+            
+            # ثبت‌نام با اعمال env HOME ایزوله برای ساخت ۴۰ هویت مجزا و یکتا
+            echo "y" | env HOME="$PWD/home" ../warp-plus -4 -e 162.159.192.1:2408 register
+            # اجرای پروسه با اعمال هویت ایزوله
+            env HOME="$PWD/home" ../warp-plus -b "127.0.0.1:$PORT" -4 -e 162.159.192.1:2408 > "warp.log" 2>&1 &
+            
             cd ..
             echo "Started Warp-Plus Go Instance $i on Port $PORT"
+            sleep 0.1 # جلوگیری از مسدود شدن به دلیل Anti-DDoS کلودفلر
           done
           
           # ۲. بررسی موازی باز شدن پورت‌ها به صورت پس‌زمینه بدون اتلاف وقت (حداکثر ۱ الی ۲ ثانیه)
@@ -98,7 +102,7 @@ jobs:
           blacklist_lock = threading.Lock()
 
           def check_and_wait_for_warp(socks_port):
-              """صبر کردن برای فعال شدن کامل کانتینر داکر وارپ و اطمینان از تغییر واقعی IP به کلودفلر"""
+              """صبر کردن برای فعال شدن کامل پروکسی وارپ و اطمینان از تغییر واقعی IP به کلودفلر"""
               for _ in range(15):
                   try:
                       proxies = {
@@ -123,20 +127,20 @@ jobs:
               return None
 
           def renew_warp_ip(worker_index, socks_port):
-              """بستن فوق‌العاده سریع پروسه بومی وارپ پلاس و پاک کردن دایرکتوری آن برای چرخاندن آی‌پی"""
+              """بستن سریع پروسه بومی وارپ پلاس و دریافت هویت کاملاً مجزا و جدید در پوشه ایزوله"""
               try:
                   # ۱. بستن پروسه قبلی با پورت مربوطه
                   subprocess.run(f"fuser -k {socks_port}/tcp || kill -9 $(lsof -t -i:{socks_port})", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   time.sleep(0.2)
                   
-                  # ۲. پاک کردن پوشه ایزوله کارگر
+                  # ۲. پاک کردن پوشه ایزوله کارگر برای دریافت هویت کاملاً جدید
                   subprocess.run(f"rm -rf warp_dir_{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   time.sleep(0.1)
                   
-                  # ۳. ساخت پوشه مجدد، پذیرش خودکار قوانین و اجرای مجدد پروسه بومی با فورس IPv4 و آی‌پی ثابت
-                  subprocess.run(f"mkdir -p warp_dir_{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  subprocess.run(f"cd warp_dir_{worker_index} && echo y | ../warp-plus -4 -e 162.159.192.1:2408 register", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  subprocess.run(f"cd warp_dir_{worker_index} && ../warp-plus -b 127.0.0.1:{socks_port} -4 -e 162.159.192.1:2408 > warp.log 2>&1 &", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  # ۳. ساخت پوشه مجدد با مسیر ایزوله، پذیرش خودکار و اجرای مجدد
+                  subprocess.run(f"mkdir -p warp_dir_{worker_index}/home", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  subprocess.run(f"cd warp_dir_{worker_index} && echo y | env HOME=\"$PWD/home\" ../warp-plus -4 -e 162.159.192.1:2408 register", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                  subprocess.run(f"cd warp_dir_{worker_index} && env HOME=\"$PWD/home\" ../warp-plus -b 127.0.0.1:{socks_port} -4 -e 162.159.192.1:2408 > warp.log 2>&1 &", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   
                   current_ip = check_and_wait_for_warp(socks_port)
                   if current_ip:
@@ -272,7 +276,7 @@ jobs:
                       
                   time.sleep(2)
 
-          # راه‌اندازی ۴۰ نخ کارگر موازی به همراه اختصاص پورت‌های داکر مجزا
+          # راه‌اندازی ۴۰ نخ کارگر موازی به همراه اختصاص پورت‌های مجزا
           threads = []
           for idx in range(1, 41):
               port = 4000 + idx
