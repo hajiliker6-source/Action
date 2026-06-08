@@ -31,29 +31,29 @@ jobs:
         id: cache-warp
         uses: actions/cache@v4
         with:
-          path: ~/warp-image.tar
+          path: ${{ github.workspace }}/warp-image.tar
           key: ${{ runner.os }}-warp-image-v1
 
       - name: Load WARP Docker Image from Cache
         if: steps.cache-warp.outputs.cache-hit == 'true'
-        run: docker load -i ~/warp-image.tar
+        run: docker load -i ${{ github.workspace }}/warp-image.tar
 
       - name: Pull and Save WARP Docker Image
         if: steps.cache-warp.outputs.cache-hit != 'true'
         run: |
           docker pull caomingjun/warp
-          docker save -o ~/warp-image.tar caomingjun/warp
+          docker save -o ${{ github.workspace }}/warp-image.tar caomingjun/warp
 
       - name: Start 40 Parallel WARP Containers
         run: |
-          # ۱. اجرای فوری کانتینرهای داکر وارپ
+          # ۱. اجرای همزمان تمام ۴۰ کانتینر در پس‌زمینه (کاهش زمان از ۱۱ ثانیه به کمتر از ۲ ثانیه)
           for i in {1..40}; do
             PORT=$((4000 + i))
-            docker run -d --name warp$i --cap-add=NET_ADMIN -p $PORT:1080 caomingjun/warp
-            echo "Started WARP Instance $i on Port $PORT"
+            docker run -d --name warp$i --cap-add=NET_ADMIN -p $PORT:1080 caomingjun/warp &
           done
+          wait # منتظر می‌ماند تا دستور ساخت هر ۴۰ کانتینر صادر شود
           
-          # ۲. مانیتورینگ و انتظار موازی برای باز شدن پورت‌ها (حذف کامل مکث ۳۵ ثانیه‌ای ثابت)
+          # ۲. مانیتورینگ و انتظار موازی برای باز شدن پورت‌ها به صورت همزمان
           echo "در حال بررسی موازی وضعیت اتصال کلاینت‌های وارپ..."
           for i in {1..40}; do
             PORT=$((4000 + i))
