@@ -53,11 +53,11 @@ jobs:
 
       - name: Start 20 Parallel WARP Containers Fast
         run: |
-          # ۱. اجرای همزمان ۲۰ کانتینر (برای جلوگیری از خفگی CPU) و خاموش کردن اجباری IPv6 جهت دریافت IPv4
+          # اجرای همزمان ۲۰ کانتینر با فعال بودن پروتکل بکر IPv6 جهت دور زدن محدودیت‌های اشتراکی سهمیه Hugging Face
           for i in {1..20}; do
             PORT=$((4000 + i))
-            docker run -d --name warp$i --cap-add=NET_ADMIN --sysctl net.ipv6.conf.all.disable_ipv6=1 -p $PORT:1080 caomingjun/warp > /dev/null 2>&1
-            echo "Started WARP Docker Instance $i on Port $PORT (IPv4 Only)"
+            docker run -d --name warp$i --cap-add=NET_ADMIN -p $PORT:1080 caomingjun/warp > /dev/null 2>&1
+            echo "Started WARP Docker Instance $i on Port $PORT"
           done
           
           # ۲. مانیتورینگ موازی: به محض باز شدن پورت، کارگر آزاد می‌شود
@@ -99,8 +99,8 @@ jobs:
           max_run_duration = 5 * 60 * 60  # 5 hours
           github_run_id = os.environ.get("GITHUB_RUN_ID", "local-worker")
 
-          # ساخت حافظه موقت بلک‌لیست آی‌پی‌های مسدود شده به صورت سراسری
-          blacklisted_ips = set()
+          # ساخت حافظه موقت بلک‌لیست بلوک‌های مسدود شده به صورت سراسری
+          blacklisted_subnets = set()
           blacklist_lock = threading.Lock()
 
           def send_live_log(run_id, message):
@@ -111,6 +111,17 @@ jobs:
                   requests.post(f"{SPACE_URL}/api/log/update", json={"run_id": str(run_id), "message": str(message)}, timeout=3)
               except Exception as e:
                   print(f"Failed to send live log: {e}", flush=True)
+
+          def get_subnet(ip):
+              """استخراج بلوک اصلی آی‌پی برای جلوگیری از استفاده مجدد از کل رنج آی‌پی‌های مسدود شده"""
+              if not ip:
+                  return None
+              if ":" in ip:
+                  # برای IPv6 چهار بخش اول را به عنوان بلوک /64 در نظر می‌گیریم تا کل بلاک مسدود شود
+                  parts = ip.split(":")
+                  if len(parts) >= 4:
+                      return ":".join(parts[:4])
+              return ip # برای IPv4 مسدودسازی را فقط روی تک آی‌پی اعمال می‌کنیم تا مشکل اتمام آی‌پی پیش نیاید
 
           def check_and_wait_for_warp(socks_port):
               """صبر کردن برای فعال شدن کامل کانتینر وارپ و تأیید اتصال"""
@@ -148,6 +159,7 @@ jobs:
                   
                   current_ip = check_and_wait_for_warp(socks_port)
                   if current_ip:
+                      subnet = get_subnet(current_ip)
                       if run_id:
                           send_live_log(run_id, f"✅ کارگر شماره {worker_index}: آی‌پی جدید با موفقیت دریافت شد: {current_ip}")
                       print(f"🔄 [Worker {worker_index}] WARP IP rotated successfully. New IP: {current_ip}", flush=True)
@@ -170,12 +182,12 @@ jobs:
                           pass
 
                       current_ip = check_and_wait_for_warp(socks_port)
+                      current_subnet = get_subnet(current_ip)
                       
                       with blacklist_lock:
-                          is_blacklisted = current_ip in blacklisted_ips if current_ip else True
+                          is_blacklisted = current_subnet in blacklisted_subnets if current_subnet else True
 
                       if not current_ip or is_blacklisted:
-                          # در این لوپ هنوز run_id کاری را نداریم، پس فقط پرینت محلی می‌کنیم
                           renew_warp_ip(worker_index, socks_port)
                           time.sleep(2)
                           continue
@@ -236,7 +248,6 @@ jobs:
                                   clean_line = line.strip()
                                   print(f"[{run_id}] {clean_line}", flush=True)
                                   output_lines.append(clean_line)
-                                  # پمپاژ خط‌به‌خط لاگ خروجی اسکریپت رندر مدل به سمت فرانت‌باکس
                                   send_live_log(run_id, f"[خروجی رانر] {clean_line}")
                                   
                               process.wait()
@@ -250,19 +261,19 @@ jobs:
                                   send_live_log(run_id, "✅ فرآیند رندر مدل با موفقیت پایان یافت. عکس به سرور آپلود شد.")
                                   print(f"Job {run_id} finished successfully.", flush=True)
                               else:
-                                  send_live_log(run_id, f"❌ خطا: اجرای اسکریپت با شکست مواجه شد (کد خروج {process.returncode}). آی‌پی {current_ip} وارد بلک‌لیست شد.")
+                                  send_live_log(run_id, f"❌ خطا: اجرای اسکریپت با شکست مواجه شد (کد خروج {process.returncode}). بلوک {current_subnet} وارد بلک‌لیست شد.")
                                   print(f"[{run_id}] ⚠️ Job failed (Exit Code {process.returncode}). Blacklisting IP {current_ip} and releasing job back to queue...", flush=True)
                                   
-                                  if current_ip:
+                                  if current_subnet:
                                       with blacklist_lock:
-                                          blacklisted_ips.add(current_ip)
+                                          blacklisted_subnets.add(current_subnet)
                                   
                                   try:
                                       requests.post(
                                           f"{SPACE_URL}/api/webhook/fail",
                                           json={
                                               "run_id": run_id,
-                                              "error": f"IP rate-limit/quota issue on {current_ip}. Released for Hot-Swap retry.",
+                                              "error": f"IP rate-limit/quota issue on {current_subnet}. Released for Hot-Swap retry.",
                                               "github_run_id": os.environ.get("GITHUB_RUN_ID", "")
                                           },
                                           timeout=15
@@ -270,7 +281,6 @@ jobs:
                                   except Exception as ex:
                                       print(f"Error releasing job back to server: {ex}", flush=True)
                                       
-                                  # در زمان چرخش آی‌پی، شناسه فرآیند را پاس می‌دهیم تا مراحل فیزیکی لود مجدد برای کاربر نمایش داده شود
                                   renew_warp_ip(worker_index, socks_port, run_id=run_id)
                                   
                               continue
