@@ -12,68 +12,17 @@ jobs:
   execute:
     runs-on: ubuntu-latest
     steps:
-      - name: Create Temp Requirements for Caching
-        run: |
-          echo -e "gradio_client\nrequests[socks]\npillow\nhttpx[socks]\npysocks\nsocksio" > temp_requirements.txt
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
-          cache-dependency-path: temp_requirements.txt
 
       - name: Install Base Dependencies
         run: |
-          pip install -r temp_requirements.txt
+          # نصب کتابخانه‌های ضروری و ابزارهای اتصال پراکسی
+          pip install gradio_client requests[socks] pillow httpx[socks] pysocks socksio
 
-      - name: Restore WARP Docker Image Cache
-        id: cache-warp
-        uses: actions/cache/restore@v4
-        with:
-          path: /tmp/warp-image.tar
-          key: ${{ runner.os }}-warp-docker-v2
-
-      - name: Load WARP Docker Image from Cache
-        if: steps.cache-warp.outputs.cache-hit == 'true'
-        run: docker load -i /tmp/warp-image.tar
-
-      - name: Pull and Save WARP Docker Image
-        if: steps.cache-warp.outputs.cache-hit != 'true'
-        run: |
-          docker pull caomingjun/warp
-          docker save -o /tmp/warp-image.tar caomingjun/warp
-
-      - name: Explicitly Save WARP Docker Image Cache
-        if: steps.cache-warp.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: /tmp/warp-image.tar
-          key: ${{ runner.os }}-warp-docker-v2
-
-      - name: Start 20 Parallel WARP Containers Fast
-        run: |
-          # اجرای همزمان ۲۰ کانتینر با فعال بودن پروتکل بکر IPv6 جهت دور زدن محدودیت‌های اشتراکی سهمیه Hugging Face
-          for i in {1..20}; do
-            PORT=$((4000 + i))
-            docker run -d --name warp$i --cap-add=NET_ADMIN -p $PORT:1080 caomingjun/warp > /dev/null 2>&1
-            echo "Started WARP Docker Instance $i on Port $PORT"
-          done
-          
-          # ۲. مانیتورینگ موازی: به محض باز شدن پورت، کارگر آزاد می‌شود
-          echo "در حال بررسی وضعیت اتصال پورت‌های SOCKS5..."
-          for i in {1..20}; do
-            PORT=$((4000 + i))
-            (
-              while ! (echo > /dev/tcp/127.0.0.1/$PORT) >/dev/null 2>&1; do
-                sleep 0.2
-              done
-            ) &
-          done
-          wait
-          echo "هر ۲۰ پروکسی به صورت کامل لود شدند!"
-
-      - name: Run Persistent Worker
+      - name: Run Persistent Ghost Worker
         env:
           SPACE_URL: ${{ github.event.client_payload.space_url }}
         run: |
@@ -82,115 +31,80 @@ jobs:
           import sys
           import time
           import json
-          import socket
           import requests
           import subprocess
           import threading
-          from datetime import datetime
+          import random
 
           SPACE_URL = os.environ.get("SPACE_URL")
           if not SPACE_URL:
-              print("Error: SPACE_URL env var is not set.", flush=True)
               sys.exit(1)
 
-          print(f"Starting long-running multi-worker with 20 WARPs for Space: {SPACE_URL}", flush=True)
-
+          github_run_id = os.environ.get("GITHUB_RUN_ID", "local-worker")
           start_time = time.time()
           max_run_duration = 5 * 60 * 60  # 5 hours
-          github_run_id = os.environ.get("GITHUB_RUN_ID", "local-worker")
 
-          # ساخت حافظه موقت بلک‌لیست بلوک‌های مسدود شده به صورت سراسری
-          blacklisted_subnets = set()
-          blacklist_lock = threading.Lock()
+          # استخر جهانی پراکسی‌ها
+          global_proxies = []
+          proxy_lock = threading.Lock()
 
           def send_live_log(run_id, message):
-              """ارسال مستقیم و لحظه‌ای لاگ کارگر به بک‌اند پایتون"""
+              """ارسال مستقیم و لحظه‌ای لاگ کارگر به وب‌سایت شما"""
               if not run_id:
                   return
               try:
                   requests.post(f"{SPACE_URL}/api/log/update", json={"run_id": str(run_id), "message": str(message)}, timeout=3)
-              except Exception as e:
-                  print(f"Failed to send live log: {e}", flush=True)
+              except: pass
 
-          def get_subnet(ip):
-              """استخراج بلوک اصلی آی‌پی برای جلوگیری از استفاده مجدد از کل رنج آی‌پی‌های مسدود شده"""
-              if not ip:
-                  return None
-              if ":" in ip:
-                  # برای IPv6 چهار بخش اول را به عنوان بلوک /64 در نظر می‌گیریم تا کل بلاک مسدود شود
-                  parts = ip.split(":")
-                  if len(parts) >= 4:
-                      return ":".join(parts[:4])
-              return ip # برای IPv4 مسدودسازی را فقط روی تک آی‌پی اعمال می‌کنیم تا مشکل اتمام آی‌پی پیش نیاید
-
-          def check_and_wait_for_warp(socks_port):
-              """صبر کردن برای فعال شدن کامل کانتینر وارپ و تأیید اتصال"""
-              for _ in range(15):
+          def fetch_proxies():
+              """ربات خزنده برای دانلود هزاران پراکسی SOCKS5 رایگان از سراسر جهان در چند ثانیه"""
+              urls = [
+                  "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all&ssl=all&anonymity=all",
+                  "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+                  "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_raw.txt",
+                  "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
+              ]
+              new_proxies = set()
+              for u in urls:
                   try:
-                      proxies = {
-                          'http': f'socks5h://127.0.0.1:{socks_port}',
-                          'https': f'socks5h://127.0.0.1:{socks_port}'
-                      }
-                      r = requests.get("https://www.cloudflare.com/cdn-cgi/trace", proxies=proxies, timeout=3)
+                      r = requests.get(u, timeout=10)
                       if r.status_code == 200:
-                          lines = r.text.split("\n")
-                          data = {}
-                          for line in lines:
-                              if "=" in line:
-                                  parts = line.strip().split("=", 1)
-                                  if len(parts) == 2:
-                                      data[parts[0]] = parts[1]
-                          if data.get("warp") in ["on", "plus"] and data.get("ip"):
-                              return data.get("ip")
-                  except:
-                      pass
-                  time.sleep(1)
-              return None
+                          for line in r.text.split("\n"):
+                              p = line.strip()
+                              if p and ":" in p:
+                                  new_proxies.add(p)
+                  except: pass
+              
+              with proxy_lock:
+                  global global_proxies
+                  # ادغام پراکسی‌های جدید با قبلی‌ها و بُر زدن آن‌ها
+                  global_proxies = list(set(global_proxies) | new_proxies)
+                  random.shuffle(global_proxies)
+              print(f"✅ Downloaded and loaded {len(global_proxies)} free SOCKS5 proxies.", flush=True)
 
-          def renew_warp_ip(worker_index, socks_port, run_id=None):
-              """تغییر فوق‌العاده سریع آی‌پی کانتینر داکر وارپ و مخابره وضعیت تغییر به فرانت‌باکس"""
-              try:
-                  if run_id:
-                      send_live_log(run_id, f"🔄 کارگر شماره {worker_index}: در حال حذف فایل هویتی و ری‌استارت داکر وارپ جهت دریافت آی‌پی جدید...")
-                  
-                  subprocess.run(f"docker exec warp{worker_index} rm -f /var/lib/cloudflare-warp/reg.json", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  time.sleep(0.2)
-                  subprocess.run(f"docker restart warp{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  
-                  current_ip = check_and_wait_for_warp(socks_port)
-                  if current_ip:
-                      subnet = get_subnet(current_ip)
-                      if run_id:
-                          send_live_log(run_id, f"✅ کارگر شماره {worker_index}: آی‌پی جدید با موفقیت دریافت شد: {current_ip}")
-                      print(f"🔄 [Worker {worker_index}] WARP IP rotated successfully. New IP: {current_ip}", flush=True)
-                      return current_ip
-              except Exception as e:
-                  if run_id:
-                      send_live_log(run_id, f"⚠️ کارگر شماره {worker_index}: خطا در تغییر فیزیکی آی‌پی داکر رخ داد: {e}")
-                  print(f"⚠️ [Worker {worker_index}] Error renewing WARP IP: {e}", flush=True)
-              return None
+          def get_proxy():
+              """دریافت یک پراکسی رندوم از استخر"""
+              with proxy_lock:
+                  if global_proxies:
+                      return global_proxies.pop()
+                  return None
 
-          def run_worker_thread(worker_index, socks_port):
-              print(f"[{worker_index}] Worker thread started using SOCKS {socks_port}", flush=True)
+          # لود کردن پراکسی‌ها در لحظه روشن شدن اکشن
+          fetch_proxies()
+
+          def run_worker_thread(worker_index):
               thread_worker_id = f"{github_run_id}_w{worker_index}"
               
               while time.time() - start_time < max_run_duration:
                   try:
-                      try:
+                      try: 
                           requests.post(f"{SPACE_URL}/api/worker/heartbeat", json={"worker_id": thread_worker_id}, timeout=10)
-                      except Exception as e:
-                          pass
+                      except: pass
 
-                      current_ip = check_and_wait_for_warp(socks_port)
-                      current_subnet = get_subnet(current_ip)
-                      
-                      with blacklist_lock:
-                          is_blacklisted = current_subnet in blacklisted_subnets if current_subnet else True
-
-                      if not current_ip or is_blacklisted:
-                          renew_warp_ip(worker_index, socks_port)
-                          time.sleep(2)
-                          continue
+                      # اگر تعداد پراکسی‌ها کم شد، در پس‌زمینه دوباره دانلود کن
+                      with proxy_lock:
+                          if len(global_proxies) < 100:
+                              threading.Thread(target=fetch_proxies).start()
 
                       r = requests.post(f"{SPACE_URL}/api/worker/poll", json={"worker_id": thread_worker_id}, timeout=15)
                       if r.status_code == 200:
@@ -203,96 +117,90 @@ jobs:
                               if not client_payload or client_payload == "success":
                                   client_payload = data.get("client_payload", {})
 
-                              print(f"[{run_id}] Thread {worker_index} grabbed job ({event_type}) using clean IP: {current_ip}", flush=True)
-                              send_live_log(run_id, f"📥 تسک به کارگر شماره {worker_index} واگذار شد. آی‌پی اختصاص یافته: {current_ip}")
+                              send_live_log(run_id, f"📥 تسک به کارگر شماره {worker_index} در گیت‌هاب واگذار شد.")
                               
-                              job_env = os.environ.copy()
-                              job_env["HTTP_PROXY"] = f"socks5h://127.0.0.1:{socks_port}"
-                              job_env["HTTPS_PROXY"] = f"socks5h://127.0.0.1:{socks_port}"
-                              
-                              for key, val in client_payload.items():
-                                  if key != "data":
-                                      job_env[key.upper()] = str(val)
-                              
-                              payload_data = client_payload.get("data", {})
-                              if isinstance(payload_data, dict):
-                                  for key, val in payload_data.items():
-                                      if key == "image_urls":
-                                          job_env["IMAGE_URLS"] = json.dumps(val)
-                                      else:
-                                          job_env[key.upper()] = str(val)
-                          
-                              script_content = payload_data.get("script") or client_payload.get("script")
+                              script_content = client_payload.get("data", {}).get("script") or client_payload.get("script")
                               if not script_content:
-                                  send_live_log(run_id, "❌ خطا: فایل اسکریپت رندر در پلود دریافتی یافت نشد.")
-                                  print(f"Error: No script found in payload for job {run_id}", flush=True)
                                   continue
                                   
                               script_file = f"run_job_{run_id}_w{worker_index}.py"
                               with open(script_file, "w", encoding="utf-8") as f:
                                   f.write(script_content)
-                                  
-                              print(f"Executing script for job {run_id} (IP: {current_ip})...", flush=True)
-                              send_live_log(run_id, f"⚙️ در حال اجرای اسکریپت رندر مدل {event_type}...")
-                              
-                              process = subprocess.Popen(
-                                  [sys.executable, script_file],
-                                  env=job_env,
-                                  stdout=subprocess.PIPE,
-                                  stderr=subprocess.STDOUT,
-                                  text=True
-                              )
-                              
-                              output_lines = []
-                              for line in process.stdout:
-                                  clean_line = line.strip()
-                                  print(f"[{run_id}] {clean_line}", flush=True)
-                                  output_lines.append(clean_line)
-                                  send_live_log(run_id, f"[خروجی رانر] {clean_line}")
-                                  
-                              process.wait()
-                              
-                              try:
-                                  os.remove(script_file)
-                              except:
-                                  pass
 
-                              if process.returncode == 0:
-                                  send_live_log(run_id, "✅ فرآیند رندر مدل با موفقیت پایان یافت. عکس به سرور آپلود شد.")
-                                  print(f"Job {run_id} finished successfully.", flush=True)
-                              else:
-                                  send_live_log(run_id, f"❌ خطا: اجرای اسکریپت با شکست مواجه شد (کد خروج {process.returncode}). بلوک {current_subnet} وارد بلک‌لیست شد.")
-                                  print(f"[{run_id}] ⚠️ Job failed (Exit Code {process.returncode}). Blacklisting IP {current_ip} and releasing job back to queue...", flush=True)
-                                  
-                                  if current_subnet:
-                                      with blacklist_lock:
-                                          blacklisted_subnets.add(current_subnet)
-                                  
-                                  try:
-                                      requests.post(
-                                          f"{SPACE_URL}/api/webhook/fail",
-                                          json={
-                                              "run_id": run_id,
-                                              "error": f"IP rate-limit/quota issue on {current_subnet}. Released for Hot-Swap retry.",
-                                              "github_run_id": os.environ.get("GITHUB_RUN_ID", "")
-                                          },
-                                          timeout=15
-                                      )
-                                  except Exception as ex:
-                                      print(f"Error releasing job back to server: {ex}", flush=True)
+                              success = False
+                              
+                              # حلقه تست بی‌صدای پراکسی‌ها: کارگر تا 10 بار پراکسی عوض می‌کند اما به فرانت‌اند ارور نمی‌دهد
+                              for attempt in range(1, 11):
+                                  proxy = get_proxy()
+                                  if not proxy:
+                                      time.sleep(2)
+                                      continue
                                       
-                                  renew_warp_ip(worker_index, socks_port, run_id=run_id)
+                                  send_live_log(run_id, f"🔄 تلاش داخلی {attempt}/10 | در حال تست پراکسی: {proxy}")
                                   
-                              continue
+                                  # اعمال پراکسی روی محیط کارگر
+                                  job_env = os.environ.copy()
+                                  job_env["HTTP_PROXY"] = f"socks5h://{proxy}"
+                                  job_env["HTTPS_PROXY"] = f"socks5h://{proxy}"
+                                  job_env["ALL_PROXY"] = f"socks5h://{proxy}"
+                                  
+                                  for key, val in client_payload.items():
+                                      if key != "data": 
+                                          job_env[key.upper()] = str(val)
+                                  
+                                  payload_data = client_payload.get("data", {})
+                                  if isinstance(payload_data, dict):
+                                      for key, val in payload_data.items():
+                                          if key == "image_urls": job_env["IMAGE_URLS"] = json.dumps(val)
+                                          else: job_env[key.upper()] = str(val)
+                                          
+                                  process = subprocess.Popen(
+                                      [sys.executable, script_file],
+                                      env=job_env,
+                                      stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT,
+                                      text=True
+                                  )
+                                  
+                                  # سیستم ضد-هنگ: اگر پراکسی کُند بود بعد از 2 دقیقه قطعش می‌کند
+                                  def kill_proc(p):
+                                      try: p.kill()
+                                      except: pass
+                                      
+                                  timer = threading.Timer(120, kill_proc, [process])
+                                  try:
+                                      timer.start()
+                                      for line in process.stdout:
+                                          clean_line = line.strip()
+                                          print(f"[{run_id}] {clean_line}", flush=True)
+                                          send_live_log(run_id, f"[خروجی] {clean_line}")
+                                      process.wait()
+                                  finally:
+                                      timer.cancel()
+                                  
+                                  if process.returncode == 0:
+                                      success = True
+                                      break
+                                  else:
+                                      send_live_log(run_id, f"⚠️ پراکسی قطع بود یا سهمیه نداشت. تعویض و اجرای دوباره در ۱ ثانیه...")
+
+                              try: os.remove(script_file)
+                              except: pass
+
+                              if not success:
+                                  send_live_log(run_id, "❌ تمام ۱۰ پراکسی تست شده خراب بودند. بازگرداندن به صف برای تلاش مجدد سیستم...")
+                                  try:
+                                      requests.post(f"{SPACE_URL}/api/webhook/fail", json={"run_id": run_id, "error": "All 10 proxies failed.", "github_run_id": github_run_id}, timeout=15)
+                                  except: pass
+                                  
                   except Exception as e:
                       print(f"[{worker_index}] Error in thread loop: {e}", flush=True)
-                      
                   time.sleep(2)
 
           threads = []
+          # 20 کارگر به صورت همزمان
           for idx in range(1, 21):
-              port = 4000 + idx
-              t = threading.Thread(target=run_worker_thread, args=(idx, port), daemon=True)
+              t = threading.Thread(target=run_worker_thread, args=(idx,), daemon=True)
               t.start()
               threads.append(t)
 
