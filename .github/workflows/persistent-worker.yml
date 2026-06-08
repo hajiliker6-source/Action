@@ -19,7 +19,7 @@ jobs:
 
       - name: Install Base Dependencies
         run: |
-          # نصب کتابخانه‌های ضروری و ابزارهای اتصال پراکسی
+          # نصب کتابخانه‌های ضروری و ابزارهای ارتباط پراکسی
           pip install gradio_client requests[socks] pillow httpx[socks] pysocks socksio
 
       - name: Run Persistent Ghost Worker
@@ -57,12 +57,13 @@ jobs:
               except: pass
 
           def fetch_proxies():
-              """ربات خزنده برای دانلود هزاران پراکسی SOCKS5 رایگان از سراسر جهان در چند ثانیه"""
+              """ربات خزنده برای دانلود هزاران پراکسی SOCKS5 رایگان از سراسر جهان"""
               urls = [
                   "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all&ssl=all&anonymity=all",
                   "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
                   "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_raw.txt",
-                  "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt"
+                  "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
+                  "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"
               ]
               new_proxies = set()
               for u in urls:
@@ -77,23 +78,22 @@ jobs:
               
               with proxy_lock:
                   global global_proxies
-                  # ادغام پراکسی‌های جدید با قبلی‌ها و بُر زدن آن‌ها
                   global_proxies = list(set(global_proxies) | new_proxies)
                   random.shuffle(global_proxies)
               print(f"✅ Downloaded and loaded {len(global_proxies)} free SOCKS5 proxies.", flush=True)
 
           def get_proxy():
-              """دریافت یک پراکسی رندوم از استخر"""
               with proxy_lock:
                   if global_proxies:
                       return global_proxies.pop()
                   return None
 
-          # لود کردن پراکسی‌ها در لحظه روشن شدن اکشن
+          # لود اولیه پراکسی‌ها
           fetch_proxies()
 
           def run_worker_thread(worker_index):
               thread_worker_id = f"{github_run_id}_w{worker_index}"
+              print(f"[{worker_index}] Worker thread started.", flush=True)
               
               while time.time() - start_time < max_run_duration:
                   try:
@@ -101,7 +101,7 @@ jobs:
                           requests.post(f"{SPACE_URL}/api/worker/heartbeat", json={"worker_id": thread_worker_id}, timeout=10)
                       except: pass
 
-                      # اگر تعداد پراکسی‌ها کم شد، در پس‌زمینه دوباره دانلود کن
+                      # شارژ مجدد پراکسی‌ها در صورت اتمام
                       with proxy_lock:
                           if len(global_proxies) < 100:
                               threading.Thread(target=fetch_proxies).start()
@@ -117,6 +117,7 @@ jobs:
                               if not client_payload or client_payload == "success":
                                   client_payload = data.get("client_payload", {})
 
+                              print(f"[{run_id}] Task assigned to worker {worker_index}.", flush=True)
                               send_live_log(run_id, f"📥 تسک به کارگر شماره {worker_index} در گیت‌هاب واگذار شد.")
                               
                               script_content = client_payload.get("data", {}).get("script") or client_payload.get("script")
@@ -129,16 +130,28 @@ jobs:
 
                               success = False
                               
-                              # حلقه تست بی‌صدای پراکسی‌ها: کارگر تا 10 بار پراکسی عوض می‌کند اما به فرانت‌اند ارور نمی‌دهد
+                              # سیستم اسنایپر: تست سریع 10 پراکسی
                               for attempt in range(1, 11):
                                   proxy = get_proxy()
                                   if not proxy:
-                                      time.sleep(2)
+                                      time.sleep(1)
                                       continue
                                       
-                                  send_live_log(run_id, f"🔄 تلاش داخلی {attempt}/10 | در حال تست پراکسی: {proxy}")
+                                  print(f"[{run_id}] Internal Attempt {attempt}/10 | Testing Proxy: {proxy}", flush=True)
+                                  send_live_log(run_id, f"🔍 تست سریع پراکسی {attempt}/10: {proxy}")
                                   
-                                  # اعمال پراکسی روی محیط کارگر
+                                  # تست 4 ثانیه‌ای: آیا این پراکسی اصلاً روشن است؟
+                                  try:
+                                      test_r = requests.get("https://huggingface.co/", proxies={"http": f"socks5h://{proxy}", "https": f"socks5h://{proxy}"}, timeout=4)
+                                      if test_r.status_code in [200, 401, 403, 404, 405]:
+                                          print(f"[{run_id}] Proxy {proxy} is ALIVE! Spawning Gradio...", flush=True)
+                                          send_live_log(run_id, f"✅ پراکسی روشن یافت شد. اتصال به سرور هوش مصنوعی...")
+                                      else:
+                                          continue
+                                  except Exception:
+                                      continue # پراکسی مُرده است، بدون معطلی برو بعدی
+                                  
+                                  # اگر پراکسی سالم بود، اسکریپت مدل را با آن اجرا می‌کنیم
                                   job_env = os.environ.copy()
                                   job_env["HTTP_PROXY"] = f"socks5h://{proxy}"
                                   job_env["HTTPS_PROXY"] = f"socks5h://{proxy}"
@@ -162,12 +175,12 @@ jobs:
                                       text=True
                                   )
                                   
-                                  # سیستم ضد-هنگ: اگر پراکسی کُند بود بعد از 2 دقیقه قطعش می‌کند
                                   def kill_proc(p):
                                       try: p.kill()
                                       except: pass
                                       
-                                  timer = threading.Timer(120, kill_proc, [process])
+                                  # حداکثر 60 ثانیه فرصت رندر به مدل می‌دهیم
+                                  timer = threading.Timer(60, kill_proc, [process])
                                   try:
                                       timer.start()
                                       for line in process.stdout:
@@ -182,23 +195,25 @@ jobs:
                                       success = True
                                       break
                                   else:
-                                      send_live_log(run_id, f"⚠️ پراکسی قطع بود یا سهمیه نداشت. تعویض و اجرای دوباره در ۱ ثانیه...")
+                                      print(f"[{run_id}] Proxy {proxy} failed at runtime or quota hit.", flush=True)
+                                      send_live_log(run_id, f"⚠️ پراکسی روشن بود اما سهمیه نداشت. تعویض فوری در کسری از ثانیه...")
 
                               try: os.remove(script_file)
                               except: pass
 
                               if not success:
+                                  print(f"[{run_id}] All 10 proxies failed. Retrying in queue...", flush=True)
                                   send_live_log(run_id, "❌ تمام ۱۰ پراکسی تست شده خراب بودند. بازگرداندن به صف برای تلاش مجدد سیستم...")
                                   try:
                                       requests.post(f"{SPACE_URL}/api/webhook/fail", json={"run_id": run_id, "error": "All 10 proxies failed.", "github_run_id": github_run_id}, timeout=15)
                                   except: pass
                                   
                   except Exception as e:
-                      print(f"[{worker_index}] Error in thread loop: {e}", flush=True)
+                      pass
                   time.sleep(2)
 
           threads = []
-          # 20 کارگر به صورت همزمان
+          # اجرای 20 کارگر موازی
           for idx in range(1, 21):
               t = threading.Thread(target=run_worker_thread, args=(idx,), daemon=True)
               t.start()
