@@ -99,25 +99,9 @@ jobs:
           max_run_duration = 5 * 60 * 60  # 5 hours
           github_run_id = os.environ.get("GITHUB_RUN_ID", "local-worker")
 
-          # ساخت حافظه موقت بلک‌لیست بلوک‌های مسدود شده به صورت سراسری
-          blacklisted_subnets = set()
+          # ساخت حافظه موقت بلک‌لیست آی‌پی‌های مسدود شده به صورت سراسری
+          blacklisted_ips = set()
           blacklist_lock = threading.Lock()
-
-          def get_subnet(ip):
-              """استخراج بلوک اصلی آی‌پی برای جلوگیری از استفاده مجدد از کل رنج آی‌پی‌های مسدود شده"""
-              if not ip:
-                  return None
-              if ":" in ip:
-                  # برای IPv6 چهار بخش اول را به عنوان بلوک /64 در نظر می‌گیریم
-                  parts = ip.split(":")
-                  if len(parts) >= 4:
-                      return ":".join(parts[:4])
-              else:
-                  # برای IPv4 سه بخش اول را به عنوان بلوک /24 در نظر می‌گیریم
-                  parts = ip.split(".")
-                  if len(parts) >= 3:
-                      return ".".join(parts[:3])
-              return ip
 
           def check_and_wait_for_warp(socks_port):
               """استفاده از سیستم هوشمند پایتون برای تست واقعی تونل کلودفلر"""
@@ -153,8 +137,7 @@ jobs:
                   
                   current_ip = check_and_wait_for_warp(socks_port)
                   if current_ip:
-                      subnet = get_subnet(current_ip)
-                      print(f"🔄 [Worker {worker_index}] WARP IP rotated. New IP: {current_ip} (Subnet: {subnet})", flush=True)
+                      print(f"🔄 [Worker {worker_index}] WARP IP rotated successfully. New IP: {current_ip}", flush=True)
                       return current_ip
               except Exception as e:
                   print(f"⚠️ [Worker {worker_index}] Error renewing WARP IP: {e}", flush=True)
@@ -172,14 +155,13 @@ jobs:
                           pass
 
                       current_ip = check_and_wait_for_warp(socks_port)
-                      current_subnet = get_subnet(current_ip)
                       
                       with blacklist_lock:
-                          is_blacklisted = current_subnet in blacklisted_subnets if current_subnet else True
+                          is_blacklisted = current_ip in blacklisted_ips if current_ip else True
 
                       if not current_ip or is_blacklisted:
                           if is_blacklisted and current_ip:
-                              print(f"[{worker_index}] ⚠️ Subnet {current_subnet} is blacklisted. Rotating in background...", flush=True)
+                              print(f"[{worker_index}] ⚠️ IP {current_ip} is blacklisted. Rotating in background...", flush=True)
                           else:
                               print(f"[{worker_index}] ⚠️ WARP offline. Initializing/reconnecting in background...", flush=True)
                           renew_warp_ip(worker_index, socks_port)
@@ -249,18 +231,18 @@ jobs:
                               if process.returncode == 0:
                                   print(f"Job {run_id} finished successfully.", flush=True)
                               else:
-                                  print(f"[{run_id}] ⚠️ Job failed (Exit Code {process.returncode}). Blacklisting SUBNET {current_subnet} and releasing job back to queue...", flush=True)
+                                  print(f"[{run_id}] ⚠️ Job failed (Exit Code {process.returncode}). Blacklisting IP {current_ip} and releasing job back to queue...", flush=True)
                                   
-                                  if current_subnet:
+                                  if current_ip:
                                       with blacklist_lock:
-                                          blacklisted_subnets.add(current_subnet)
+                                          blacklisted_ips.add(current_ip)
                                   
                                   try:
                                       requests.post(
                                           f"{SPACE_URL}/api/webhook/fail",
                                           json={
                                               "run_id": run_id,
-                                              "error": f"IP/Subnet rate-limit issue on {current_subnet}. Released for Hot-Swap retry.",
+                                              "error": f"IP rate-limit/quota issue on {current_ip}. Released for Hot-Swap retry.",
                                               "github_run_id": os.environ.get("GITHUB_RUN_ID", "")
                                           },
                                           timeout=15
@@ -277,7 +259,6 @@ jobs:
                   time.sleep(2)
 
           threads = []
-          # تعداد پروسه‌ها به 20 کاهش یافته تا سرور پایدارتر بماند و آی‌پی‌ها قطع نشوند
           for idx in range(1, 21):
               port = 4000 + idx
               t = threading.Thread(target=run_worker_thread, args=(idx, port), daemon=True)
