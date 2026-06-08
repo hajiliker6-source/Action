@@ -103,8 +103,17 @@ jobs:
           blacklisted_ips = set()
           blacklist_lock = threading.Lock()
 
+          def send_live_log(run_id, message):
+              """ارسال مستقیم و لحظه‌ای لاگ کارگر به بک‌اند پایتون"""
+              if not run_id:
+                  return
+              try:
+                  requests.post(f"{SPACE_URL}/api/log/update", json={"run_id": str(run_id), "message": str(message)}, timeout=3)
+              except Exception as e:
+                  print(f"Failed to send live log: {e}", flush=True)
+
           def check_and_wait_for_warp(socks_port):
-              """استفاده از سیستم هوشمند پایتون برای تست واقعی تونل کلودفلر"""
+              """صبر کردن برای فعال شدن کامل کانتینر وارپ و تأیید اتصال"""
               for _ in range(15):
                   try:
                       proxies = {
@@ -120,7 +129,6 @@ jobs:
                                   parts = line.strip().split("=", 1)
                                   if len(parts) == 2:
                                       data[parts[0]] = parts[1]
-                          # تأیید برقراری امن تونل
                           if data.get("warp") in ["on", "plus"] and data.get("ip"):
                               return data.get("ip")
                   except:
@@ -128,18 +136,25 @@ jobs:
                   time.sleep(1)
               return None
 
-          def renew_warp_ip(worker_index, socks_port):
-              """دریافت آی‌پی جدید با ری‌استارت سریع کانتینر داکر"""
+          def renew_warp_ip(worker_index, socks_port, run_id=None):
+              """تغییر فوق‌العاده سریع آی‌پی کانتینر داکر وارپ و مخابره وضعیت تغییر به فرانت‌باکس"""
               try:
+                  if run_id:
+                      send_live_log(run_id, f"🔄 کارگر شماره {worker_index}: در حال حذف فایل هویتی و ری‌استارت داکر وارپ جهت دریافت آی‌پی جدید...")
+                  
                   subprocess.run(f"docker exec warp{worker_index} rm -f /var/lib/cloudflare-warp/reg.json", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   time.sleep(0.2)
                   subprocess.run(f"docker restart warp{worker_index}", shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                   
                   current_ip = check_and_wait_for_warp(socks_port)
                   if current_ip:
+                      if run_id:
+                          send_live_log(run_id, f"✅ کارگر شماره {worker_index}: آی‌پی جدید با موفقیت دریافت شد: {current_ip}")
                       print(f"🔄 [Worker {worker_index}] WARP IP rotated successfully. New IP: {current_ip}", flush=True)
                       return current_ip
               except Exception as e:
+                  if run_id:
+                      send_live_log(run_id, f"⚠️ کارگر شماره {worker_index}: خطا در تغییر فیزیکی آی‌پی داکر رخ داد: {e}")
                   print(f"⚠️ [Worker {worker_index}] Error renewing WARP IP: {e}", flush=True)
               return None
 
@@ -160,10 +175,7 @@ jobs:
                           is_blacklisted = current_ip in blacklisted_ips if current_ip else True
 
                       if not current_ip or is_blacklisted:
-                          if is_blacklisted and current_ip:
-                              print(f"[{worker_index}] ⚠️ IP {current_ip} is blacklisted. Rotating in background...", flush=True)
-                          else:
-                              print(f"[{worker_index}] ⚠️ WARP offline. Initializing/reconnecting in background...", flush=True)
+                          # در این لوپ هنوز run_id کاری را نداریم، پس فقط پرینت محلی می‌کنیم
                           renew_warp_ip(worker_index, socks_port)
                           time.sleep(2)
                           continue
@@ -180,6 +192,7 @@ jobs:
                                   client_payload = data.get("client_payload", {})
 
                               print(f"[{run_id}] Thread {worker_index} grabbed job ({event_type}) using clean IP: {current_ip}", flush=True)
+                              send_live_log(run_id, f"📥 تسک به کارگر شماره {worker_index} واگذار شد. آی‌پی اختصاص یافته: {current_ip}")
                               
                               job_env = os.environ.copy()
                               job_env["HTTP_PROXY"] = f"socks5h://127.0.0.1:{socks_port}"
@@ -199,6 +212,7 @@ jobs:
                           
                               script_content = payload_data.get("script") or client_payload.get("script")
                               if not script_content:
+                                  send_live_log(run_id, "❌ خطا: فایل اسکریپت رندر در پلود دریافتی یافت نشد.")
                                   print(f"Error: No script found in payload for job {run_id}", flush=True)
                                   continue
                                   
@@ -207,6 +221,7 @@ jobs:
                                   f.write(script_content)
                                   
                               print(f"Executing script for job {run_id} (IP: {current_ip})...", flush=True)
+                              send_live_log(run_id, f"⚙️ در حال اجرای اسکریپت رندر مدل {event_type}...")
                               
                               process = subprocess.Popen(
                                   [sys.executable, script_file],
@@ -218,8 +233,11 @@ jobs:
                               
                               output_lines = []
                               for line in process.stdout:
-                                  print(f"[{run_id}] {line.strip()}", flush=True)
-                                  output_lines.append(line)
+                                  clean_line = line.strip()
+                                  print(f"[{run_id}] {clean_line}", flush=True)
+                                  output_lines.append(clean_line)
+                                  # پمپاژ خط‌به‌خط لاگ خروجی اسکریپت رندر مدل به سمت فرانت‌باکس
+                                  send_live_log(run_id, f"[خروجی رانر] {clean_line}")
                                   
                               process.wait()
                               
@@ -229,8 +247,10 @@ jobs:
                                   pass
 
                               if process.returncode == 0:
+                                  send_live_log(run_id, "✅ فرآیند رندر مدل با موفقیت پایان یافت. عکس به سرور آپلود شد.")
                                   print(f"Job {run_id} finished successfully.", flush=True)
                               else:
+                                  send_live_log(run_id, f"❌ خطا: اجرای اسکریپت با شکست مواجه شد (کد خروج {process.returncode}). آی‌پی {current_ip} وارد بلک‌لیست شد.")
                                   print(f"[{run_id}] ⚠️ Job failed (Exit Code {process.returncode}). Blacklisting IP {current_ip} and releasing job back to queue...", flush=True)
                                   
                                   if current_ip:
@@ -250,7 +270,8 @@ jobs:
                                   except Exception as ex:
                                       print(f"Error releasing job back to server: {ex}", flush=True)
                                       
-                                  renew_warp_ip(worker_index, socks_port)
+                                  # در زمان چرخش آی‌پی، شناسه فرآیند را پاس می‌دهیم تا مراحل فیزیکی لود مجدد برای کاربر نمایش داده شود
+                                  renew_warp_ip(worker_index, socks_port, run_id=run_id)
                                   
                               continue
                   except Exception as e:
