@@ -19,8 +19,63 @@ jobs:
 
       - name: Install Base Dependencies
         run: |
-          # نصب کتابخانه‌های ضروری و ابزارهای ارتباط پراکسی
           pip install gradio_client requests[socks] pillow httpx[socks] pysocks socksio
+
+      - name: Build VPN Gate Docker Image
+        run: |
+          # ساخت یک ایمیج فوق سبک برای اجرای OpenVPN و تبدیل آن به SOCKS5 داخلی
+          mkdir -p vpn_docker
+          cat << 'EOF' > vpn_docker/Dockerfile
+          FROM alpine:latest
+          RUN apk add --no-cache openvpn curl bash
+          RUN apk add --no-cache microsocks --repository=http://dl-cdn.alpinelinux.org/alpine/edge/testing/
+          COPY entrypoint.sh /entrypoint.sh
+          RUN chmod +x /entrypoint.sh
+          ENTRYPOINT ["/entrypoint.sh"]
+          EOF
+
+          cat << 'EOF' > vpn_docker/entrypoint.sh
+          #!/bin/bash
+          # ورود خودکار مشخصات vpn gate
+          echo -e "vpn\nvpn" > /pass.txt
+          sed -i 's/^auth-user-pass.*/auth-user-pass \/pass.txt/' /vpn.ovpn
+          
+          # اجرای پراکسی در پس‌زمینه
+          microsocks -p 1080 &
+          
+          # اجرای VPN ژاپن (اگر این گره خاموش باشد، کانتینر خودکار بسته می‌شود و پایتون سریع متوجه می‌شود)
+          exec openvpn --config /vpn.ovpn --pull-filter ignore "ifconfig-ipv6" --pull-filter ignore "route-ipv6" --auth-retry nointeract
+          EOF
+
+          docker build -t vpngate-node vpn_docker/
+
+      - name: Fetch VPN Gate (Japan) & Start 20 Nodes
+        run: |
+          echo "📥 Downloading VPN Gate database (University of Tsukuba, Japan)..."
+          # دریافت لیست سرورهای داوطلبانه از دانشگاه تسوکوبا
+          curl -s https://www.vpngate.net/api/iphone/ | grep -E "^[^#*]" > vpngate.csv
+          
+          # مرتب‌سازی بر اساس بالاترین امتیاز پایداری (Score)
+          sort -t, -k3 -nr vpngate.csv > sorted_vpn.csv
+          
+          i=1
+          while IFS=, read -r HostName IP Score Ping Speed CountryLong CountryShort NumVpnSessions Uptime Users TotalTraffic LogType Operator Message OpenVPN_ConfigData_Base64; do
+            if [ -n "$OpenVPN_ConfigData_Base64" ] && [ "$OpenVPN_ConfigData_Base64" != "\r" ]; then
+              B64=$(echo "$OpenVPN_ConfigData_Base64" | tr -d '\r')
+              echo "$B64" | base64 -d > "vpn_dir_$i.ovpn" 2>/dev/null
+              
+              if [ -s "vpn_dir_$i.ovpn" ]; then
+                PORT=$((4000 + i))
+                docker run -d --name vpn$i --cap-add=NET_ADMIN --device=/dev/net/tun -v $(pwd)/vpn_dir_$i.ovpn:/vpn.ovpn -p $PORT:1080 vpngate-node > /dev/null 2>&1
+                echo "✅ Started VPN Gate Node $i on Port $PORT (Country: $CountryLong, Score: $Score)"
+                i=$((i+1))
+                if [ "$i" -gt 20 ]; then break; fi
+              fi
+            fi
+          done < sorted_vpn.csv
+          
+          echo "⏳ Waiting 12 seconds for OpenVPN Handshakes..."
+          sleep 12
 
       - name: Run Persistent Ghost Worker
         env:
@@ -44,10 +99,6 @@ jobs:
           start_time = time.time()
           max_run_duration = 5 * 60 * 60  # 5 hours
 
-          # استخر جهانی پراکسی‌ها
-          global_proxies = []
-          proxy_lock = threading.Lock()
-
           def send_live_log(run_id, message):
               """ارسال مستقیم و لحظه‌ای لاگ کارگر به وب‌سایت شما"""
               if not run_id:
@@ -55,41 +106,6 @@ jobs:
               try:
                   requests.post(f"{SPACE_URL}/api/log/update", json={"run_id": str(run_id), "message": str(message)}, timeout=3)
               except: pass
-
-          def fetch_proxies():
-              """ربات خزنده برای دانلود هزاران پراکسی SOCKS5 رایگان از سراسر جهان"""
-              urls = [
-                  "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=3000&country=all&ssl=all&anonymity=all",
-                  "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-                  "https://raw.githubusercontent.com/roosterkid/openproxylist/main/SOCKS5_raw.txt",
-                  "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/socks5.txt",
-                  "https://raw.githubusercontent.com/hookzof/socks5_list/master/proxy.txt"
-              ]
-              new_proxies = set()
-              for u in urls:
-                  try:
-                      r = requests.get(u, timeout=10)
-                      if r.status_code == 200:
-                          for line in r.text.split("\n"):
-                              p = line.strip()
-                              if p and ":" in p:
-                                  new_proxies.add(p)
-                  except: pass
-              
-              with proxy_lock:
-                  global global_proxies
-                  global_proxies = list(set(global_proxies) | new_proxies)
-                  random.shuffle(global_proxies)
-              print(f"✅ Downloaded and loaded {len(global_proxies)} free SOCKS5 proxies.", flush=True)
-
-          def get_proxy():
-              with proxy_lock:
-                  if global_proxies:
-                      return global_proxies.pop()
-                  return None
-
-          # لود اولیه پراکسی‌ها
-          fetch_proxies()
 
           def run_worker_thread(worker_index):
               thread_worker_id = f"{github_run_id}_w{worker_index}"
@@ -100,11 +116,6 @@ jobs:
                       try: 
                           requests.post(f"{SPACE_URL}/api/worker/heartbeat", json={"worker_id": thread_worker_id}, timeout=10)
                       except: pass
-
-                      # شارژ مجدد پراکسی‌ها در صورت اتمام
-                      with proxy_lock:
-                          if len(global_proxies) < 100:
-                              threading.Thread(target=fetch_proxies).start()
 
                       r = requests.post(f"{SPACE_URL}/api/worker/poll", json={"worker_id": thread_worker_id}, timeout=15)
                       if r.status_code == 200:
@@ -130,28 +141,34 @@ jobs:
 
                               success = False
                               
-                              # سیستم اسنایپر: تست سریع 10 پراکسی
-                              for attempt in range(1, 11):
-                                  proxy = get_proxy()
-                                  if not proxy:
-                                      time.sleep(1)
-                                      continue
+                              # پورت‌های اختصاص یافته به 20 کانتینر VPN Gate
+                              available_ports = list(range(4001, 4021))
+                              random.shuffle(available_ports)
+                              
+                              # سیستم اسنایپر: تست پیش‌هنگام گره‌های خانگی
+                              for attempt in range(1, len(available_ports) + 1):
+                                  if not available_ports:
+                                      break
+                                  port = available_ports.pop()
+                                  proxy = f"127.0.0.1:{port}"
                                       
-                                  print(f"[{run_id}] Internal Attempt {attempt}/10 | Testing Proxy: {proxy}", flush=True)
-                                  send_live_log(run_id, f"🔍 تست سریع پراکسی {attempt}/10: {proxy}")
+                                  print(f"[{run_id}] Internal Attempt {attempt} | Testing VPN Node on port {port}...", flush=True)
+                                  send_live_log(run_id, f"🔍 تست اتصال به گره VPN خانگی (پورت {port})...")
                                   
-                                  # تست 4 ثانیه‌ای: آیا این پراکسی اصلاً روشن است؟
+                                  # تست 5 ثانیه‌ای برای بررسی زنده بودن سیستم میزبان داوطلب
                                   try:
-                                      test_r = requests.get("https://huggingface.co/", proxies={"http": f"socks5h://{proxy}", "https": f"socks5h://{proxy}"}, timeout=4)
+                                      test_r = requests.get("https://huggingface.co/", proxies={"http": f"socks5h://{proxy}", "https": f"socks5h://{proxy}"}, timeout=5)
                                       if test_r.status_code in [200, 401, 403, 404, 405]:
-                                          print(f"[{run_id}] Proxy {proxy} is ALIVE! Spawning Gradio...", flush=True)
-                                          send_live_log(run_id, f"✅ پراکسی روشن یافت شد. اتصال به سرور هوش مصنوعی...")
+                                          print(f"[{run_id}] VPN Node on {port} is ALIVE! Spawning Gradio...", flush=True)
+                                          send_live_log(run_id, f"✅ گره متصل است! اجرای مدل هوش مصنوعی (بدون تحریم آی‌پی)...")
                                       else:
+                                          send_live_log(run_id, f"⚠️ گره پاسخ نداد. پرش در ۱ ثانیه...")
                                           continue
                                   except Exception:
-                                      continue # پراکسی مُرده است، بدون معطلی برو بعدی
+                                      send_live_log(run_id, f"⚠️ گره قطع بود. پرش سریع به گره بعدی...")
+                                      continue 
                                   
-                                  # اگر پراکسی سالم بود، اسکریپت مدل را با آن اجرا می‌کنیم
+                                  # اجرای اسکریپت رندر مدل با اتصال از طریق گره سالم
                                   job_env = os.environ.copy()
                                   job_env["HTTP_PROXY"] = f"socks5h://{proxy}"
                                   job_env["HTTPS_PROXY"] = f"socks5h://{proxy}"
@@ -179,8 +196,8 @@ jobs:
                                       try: p.kill()
                                       except: pass
                                       
-                                  # حداکثر 60 ثانیه فرصت رندر به مدل می‌دهیم
-                                  timer = threading.Timer(60, kill_proc, [process])
+                                  # 90 ثانیه فرصت رندر به مدل می‌دهیم
+                                  timer = threading.Timer(90, kill_proc, [process])
                                   try:
                                       timer.start()
                                       for line in process.stdout:
@@ -195,17 +212,17 @@ jobs:
                                       success = True
                                       break
                                   else:
-                                      print(f"[{run_id}] Proxy {proxy} failed at runtime or quota hit.", flush=True)
-                                      send_live_log(run_id, f"⚠️ پراکسی روشن بود اما سهمیه نداشت. تعویض فوری در کسری از ثانیه...")
+                                      print(f"[{run_id}] Node on port {port} failed at runtime or quota hit.", flush=True)
+                                      send_live_log(run_id, f"⚠️ عملیات قطع شد. تست گره جایگزین در کسری از ثانیه...")
 
                               try: os.remove(script_file)
                               except: pass
 
                               if not success:
-                                  print(f"[{run_id}] All 10 proxies failed. Retrying in queue...", flush=True)
-                                  send_live_log(run_id, "❌ تمام ۱۰ پراکسی تست شده خراب بودند. بازگرداندن به صف برای تلاش مجدد سیستم...")
+                                  print(f"[{run_id}] All VPN nodes failed. Retrying in queue...", flush=True)
+                                  send_live_log(run_id, "❌ تمام گره‌های تست شده قطع بودند. بازگرداندن به صف برای تلاش مجدد سیستم...")
                                   try:
-                                      requests.post(f"{SPACE_URL}/api/webhook/fail", json={"run_id": run_id, "error": "All 10 proxies failed.", "github_run_id": github_run_id}, timeout=15)
+                                      requests.post(f"{SPACE_URL}/api/webhook/fail", json={"run_id": run_id, "error": "All 20 VPN nodes failed.", "github_run_id": github_run_id}, timeout=15)
                                   except: pass
                                   
                   except Exception as e:
