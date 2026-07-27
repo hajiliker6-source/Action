@@ -34,7 +34,7 @@ jobs:
           RUN_ID: ${{ github.event.client_payload.data.run_id || github.event.client_payload.run_id }}
           SPACE_URL: ${{ github.event.client_payload.data.space_url || github.event.client_payload.space_url }}
           GITHUB_RUN_ID: ${{ github.run_id }}
-          HF_TOKEN: ${{ github.event.client_payload.data.hf_token || github.event.client_payload.hf_token }}
+          HF_TOKEN: ${{ github.event.client_payload.data.hf_token || github.event.client_payload.hf_token || secrets.HF_TOKEN }}
           FILE_URL: ${{ github.event.client_payload.data.file_url || github.event.client_payload.file_url }}
           IMAGE_URLS: ${{ toJson(github.event.client_payload.data.image_urls) || toJson(github.event.client_payload.image_urls) }}
           IMAGE_URL: ${{ github.event.client_payload.data.image_url || github.event.client_payload.image_url }}
